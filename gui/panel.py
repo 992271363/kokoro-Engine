@@ -46,13 +46,20 @@ DEMO_TIMELINE = [
 
 class ControlPanel:
     def __init__(self, engine: Engine, rect: pygame.Rect,
-                 browser_rect: Optional[pygame.Rect] = None) -> None:
+                 browser_rect: Optional[pygame.Rect] = None,
+                 on_preset_change=None,
+                 desktop_size=(0, 0)) -> None:
         self.engine = engine
         self.rect = pygame.Rect(rect)
         self.widgets: List[Widget] = []
         self.browser = ResourceBrowser(
             browser_rect or self._default_browser_rect(),
             engine.assets, self._on_browser_select)
+
+        # 分辨率预设切换（窗口管理由回调持有方完成）
+        self.on_preset_change = on_preset_change
+        self.desktop_w, self.desktop_h = desktop_size
+        self.pending_resolution: Optional[str] = None
 
         # 面板参数状态（仅是待提交的参数，不是演出逻辑）
         self.pending_bg: Optional[str] = None
@@ -66,13 +73,36 @@ class ControlPanel:
 
         self._build()
         self._status_text = ""
+        self.browser_anchor: Optional[pygame.Rect] = None  # 主循环更新
 
     @property
     def modal_open(self) -> bool:
         return self.browser.modal_open
 
+    def _recenter_browser(self) -> None:
+        """按主循环提供的舞台显示区把弹层重新居中（窗口缩放后仍正确）。"""
+        if self.browser_anchor is not None:
+            r = pygame.Rect(self.browser.rect)
+            r.center = self.browser_anchor.center
+            self.browser.rect = r
+
     def _default_browser_rect(self) -> pygame.Rect:
         return pygame.Rect(self.rect.x - 424, self.rect.y + 40, 400, 480)
+
+    def set_rect(self, rect) -> None:
+        """窗口尺寸/菜单栏显隐变化时更新面板矩形。
+
+        所有控件整体平移，保持相对布局（Slider 内部几何同步）。
+        """
+        rect = pygame.Rect(rect)
+        dx, dy = rect.x - self.rect.x, rect.y - self.rect.y
+        self.rect = rect
+        if dx or dy:
+            for w in self.widgets:
+                if hasattr(w, "move_by"):
+                    w.move_by(dx, dy)
+                else:
+                    w.rect.move_ip(dx, dy)
 
     # ------------------------------------------------------------------ 布局
     def _add(self, w: Widget) -> Widget:
@@ -96,6 +126,26 @@ class ControlPanel:
     def _build(self) -> None:
         y = self.rect.y + PAD
         inner_w = self.rect.w - 2 * PAD
+
+        # ------------------------------------------------------ 画布分辨率
+        y = self._section("画布分辨率", y)
+        presets = Engine.RESOLUTION_PRESETS
+        self.res_options = [f"{p[0]}×{p[1]}" for p in presets]
+        self._res_map = dict(zip(self.res_options, presets))
+        cur = f"{self.engine.size[0]}×{self.engine.size[1]}"
+        self.pending_resolution = cur if cur in self.res_options \
+            else self.res_options[0]
+        row = self._row(y)
+        cyc_rect = pygame.Rect(row.x, row.y, row.w - BROWSE_W - 6, row.h)
+        idx = self.res_options.index(self.pending_resolution)
+        self.cyc_res = self._add(Cycler(
+            "预设", cyc_rect, self.res_options, idx,
+            on_change=lambda v: setattr(self, "pending_resolution", v)))
+        self.btn_apply_res = self._add(Button(
+            "应用",
+            pygame.Rect(row.right - BROWSE_W, row.y, BROWSE_W, row.h),
+            self._on_apply_resolution))
+        y += ROW_H + GAP + 8
 
         # ---------------------------------------------------------- 背景
         y = self._section("背景", y)
@@ -365,6 +415,7 @@ class ControlPanel:
                 b.enabled = False
 
     def update(self, dt: float) -> None:
+        self._sync_resolution_ui()
         self._sync_selection_ui()
 
         st = self.engine.get_state()
@@ -397,9 +448,11 @@ class ControlPanel:
         return consumed
 
     def _on_browse_bg(self) -> None:
+        self._recenter_browser()
         self.browser.open("bg")
 
     def _on_browse_img(self) -> None:
+        self._recenter_browser()
         self.browser.open("img")
 
     def _on_browser_select(self, target: str, key: str) -> None:
@@ -414,6 +467,29 @@ class ControlPanel:
             self.pending_bg = key
         else:
             self.show_img = key
+
+    # -------------------------------------------------------- 画布分辨率
+    def _preset_fits(self, preset) -> bool:
+        """桌面尺寸未知（dummy 等）时不限制。"""
+        return (self.desktop_w <= 0 or self.desktop_h <= 0
+                or (preset[0] <= self.desktop_w
+                    and preset[1] <= self.desktop_h))
+
+    def _on_apply_resolution(self) -> None:
+        target = self._res_map.get(self.pending_resolution)
+        if target is None or tuple(target) == tuple(self.engine.size):
+            return
+        if not self._preset_fits(target):
+            return
+        if self.on_preset_change is not None:
+            self.on_preset_change(tuple(target))
+
+    def _sync_resolution_ui(self) -> None:
+        target = self._res_map.get(self.pending_resolution)
+        self.btn_apply_res.enabled = (
+            target is not None
+            and tuple(target) != tuple(self.engine.size)
+            and self._preset_fits(target))
 
     # ------------------------------------------------------------------ 绘制
     def draw(self, surface: pygame.Surface) -> None:

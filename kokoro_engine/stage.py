@@ -134,6 +134,43 @@ class Stage:
             lower = [z for z in zs if z < cur]
             self.set_z(sid, lower[-1] if lower else zs[0])
 
+    # ------------------------------------------------------------------ 画布
+    def resize(self, new_size: Tuple[int, int],
+               bg_surface_loader=None) -> None:
+        """逻辑画布等比切换（16:9）。
+
+        - 立绘位置与贴图按同一系数缩放，场景构图比例严格保持；
+        - 通过 bg_surface_loader(name, size) 重载当前背景；
+        - 进行中的背景过渡立即结束。
+        """
+        new_size = (int(new_size[0]), int(new_size[1]))
+        new_w, new_h = new_size
+        if new_w == self.w and new_h == self.h:
+            return
+        s = new_w / self.w                      # 16:9 → x/y 同比
+        for spr in self._sprites.values():
+            spr.x *= s
+            spr.y *= s
+            w = max(1, int(spr.surface.get_width() * s + 0.5))
+            h = max(1, int(spr.surface.get_height() * s + 0.5))
+            if (w, h) != spr.surface.get_size():
+                try:
+                    spr.surface = pygame.transform.smoothscale(
+                        spr.surface, (w, h))
+                except (pygame.error, ValueError):
+                    pass
+        self.size = (new_w, new_h)
+        self.w, self.h = new_w, new_h
+        if bg_surface_loader is not None and self.bg_name:
+            try:
+                self._bg_cur = bg_surface_loader(self.bg_name, self.size)
+            except Exception as exc:
+                print(f"[stage] 背景重载失败({exc})，保留原背景。")
+        # 过渡立即结束
+        self._bg_prev = None
+        self.bg_transitioning = False
+        self._bg_progress = 1.0
+
     # ------------------------------------------------------------------ 绘制
     def draw(self, target: pygame.Surface) -> None:
         target.fill((12, 12, 16))

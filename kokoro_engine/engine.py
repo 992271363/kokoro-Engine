@@ -26,9 +26,17 @@ PosLike = Union[str, Tuple[float, float], List[float]]
 
 
 class Engine:
-    DEFAULT_STAGE_SIZE = (1152, 648)   # 16:9
+    DEFAULT_STAGE_SIZE = (1920, 1080)  # 16:9，默认项目分辨率
     CHAR_MAX_H_FRAC = 0.92             # 立绘最大高度占舞台高度比例
     CHAR_PLACEHOLDER_ASPECT = 0.52     # 占位立绘宽高比
+
+    # 16:9 分辨率预设（画布与窗口同步切换）
+    RESOLUTION_PRESETS = [
+        (1280, 720),
+        (1600, 900),
+        (1920, 1080),
+        (2560, 1440),
+    ]
 
     def __init__(self, stage_size: Tuple[int, int] = DEFAULT_STAGE_SIZE,
                  asset_dir: str = "assets") -> None:
@@ -78,6 +86,30 @@ class Engine:
                        easing: str = "ease_in_out") -> None:
         surf = self.assets.get(name, size=self.size, kind="bg")
         self.stage.set_background(surf, name, fade=fade, easing=easing)
+
+    # ------------------------------------------------------------------ 画布
+    def resize_stage(self, new_size) -> None:
+        """切换逻辑画布分辨率（16:9 预设间任意切换）。
+
+        加法 API：所有既有方法行为不变。
+        - 立绘位置与贴图按同一系数缩放 → 场景构图等比保持；
+        - 当前背景按新尺寸重新加载；
+        - 进行中的 x/y 坐标补间目标同步缩放，动画不跳变。
+        """
+        new_size = (int(new_size[0]), int(new_size[1]))
+        if tuple(new_size) == tuple(self.size):
+            return
+
+        s = new_size[1] / self.size[1]
+        for tw in self.tweens.all_tweens():
+            if tw.attr in ("x", "y"):
+                tw.from_val *= s
+                tw.to_val *= s
+
+        def _load_bg(name: str, size):
+            return self.assets.get(name, size=size, kind="bg")
+
+        self.stage.resize(new_size, bg_surface_loader=_load_bg)
 
     # ------------------------------------------------------------------ 立绘
     def show_sprite(self, sid: str, image: Optional[str] = None,

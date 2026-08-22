@@ -225,6 +225,81 @@ def main() -> int:
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    print("== 分辨率预设/画布切换 ==")
+    assert eng.size == Engine.DEFAULT_STAGE_SIZE == (1920, 1080)
+    rs = eng.show_sprite("rs", image=None, pos="center", fade=0.2)
+    run_frames(eng, 0.4, surface=surf)
+    rel_x = rs.x / eng.size[0]
+    rel_w = rs.surface.get_width() / eng.size[0]
+    eng.move_sprite("rs", to="right", dur=5.0)
+    tw = next(t for t in eng.tweens.all_tweens()
+              if t.obj is rs and t.attr == "x")
+    old_to = tw.to_val
+    eng.resize_stage((1280, 720))
+    assert eng.size == (1280, 720)
+    assert abs(tw.to_val - old_to * (720 / 1080)) < 0.01   # 补间目标同步
+    assert abs(rs.x / eng.size[0] - rel_x) < 1e-6          # 构图等比保持
+    assert abs(rs.surface.get_width() / eng.size[0] - rel_w) < 0.01
+    assert tuple(eng.stage._bg_cur.get_size()) == (1280, 720)
+    run_frames(eng, 0.3, surface=surf)                     # 新尺寸绘制不炸
+    for p in Engine.RESOLUTION_PRESETS:
+        eng.resize_stage(p)
+        assert eng.size == p
+    eng.resize_stage((1920, 1080))
+    eng.remove_sprite("rs")
+    run_frames(eng, 0.1, surface=surf)
+    print("   默认1080p/构图保持/背景重载/补间同步 OK")
+
+    print("== 窗口缩放事件兼容 + 16:9 吸附 ==")
+    import main as app
+    e_win = pygame.event.Event(pygame.WINDOWRESIZED, x=800, y=600)
+    e_vid = pygame.event.Event(pygame.VIDEORESIZE, w=800, h=600)
+    assert app.resize_event_size(e_win) == (800, 600)   # WINDOWRESIZED: x/y
+    assert app.resize_event_size(e_vid) == (800, 600)   # VIDEORESIZE: w/h
+    for w0, h0 in ((1656, 728), (1400, 900), (1920, 1080)):
+        pr, dr = app.compute_layout(w0, h0, eng.size)
+        ratio = dr.w / dr.h
+        assert abs(ratio - eng.size[0] / eng.size[1]) < 0.02
+        assert dr.right <= pr.x - 8
+        assert dr.top >= app.MARGIN and dr.bottom <= h0 - app.STATUS_BAR_H
+    # 拖拽吸附：始终回到 16:9，且不低于最小窗口
+    assert app.snap_16_9(1200, 600) == (1200, 675)      # 保宽调高更近
+    assert app.snap_16_9(1100, 700) == (1100, 619)      # 保宽调高更近
+    assert app.snap_16_9(100, 100) == (960, 540)        # 最小钳制（16:9）
+    assert app.snap_16_9(2560, 1400) == (2560, 1440)
+    assert app.choose_startup_preset(1366, 768) == (1280, 720)
+    assert app.choose_startup_preset(1920, 1080) == (1920, 1080)
+    assert app.choose_startup_preset(3840, 2160) == (2560, 1440)
+    print("   双事件属性/布局等比/snap_16_9/启动降级 OK")
+
+    print("== 面板分辨率切换链路 ==")
+    from gui.panel import ControlPanel
+    applied = []
+    p_rect = pygame.Rect(1200, 20, 432, 900)
+    pnl = ControlPanel(eng, p_rect,
+                       on_preset_change=lambda p: applied.append(p),
+                       desktop_size=(1920, 1080))
+    assert len(pnl.res_options) == 4
+    assert pnl.cyc_res.value == "1920×1080"
+    # 选中超屏预设 → 应用按钮置灰
+    pnl.pending_resolution = "2560×1440"
+    pnl._sync_resolution_ui()
+    assert not pnl.btn_apply_res.enabled
+    # 选中可用预设 → 点击应用触发回调
+    pnl.pending_resolution = "1280×720"
+    pnl._sync_resolution_ui()
+    assert pnl.btn_apply_res.enabled
+    pnl.btn_apply_res.callback()
+    assert applied == [(1280, 720)]
+    # 当前已是目标档 → 按钮置灰
+    pnl.pending_resolution = "1280×720"
+    eng.resize_stage((1280, 720))
+    pnl._sync_resolution_ui()
+    assert not pnl.btn_apply_res.enabled
+    eng.resize_stage((1920, 1080))
+    run_frames(eng, 0.1, surface=surf)
+    print("   Cycler/应用回调/超屏与同档置灰 OK")
+
     state = eng.get_state()
     assert isinstance(state, dict) and "sprites" in state
     print("== 全部通过 PASS ==")

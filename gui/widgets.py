@@ -175,6 +175,12 @@ class Slider(Widget):
         if fire and changed:
             self.on_change(self.value)
 
+    def move_by(self, dx: float, dy: float) -> None:
+        """整体平移（含内部轨道几何），供面板重锚定使用。"""
+        if dx or dy:
+            self.rect.move_ip(dx, dy)
+            self.track_rect.move_ip(dx, dy)
+
     def _apply_from_pos(self, x: int) -> None:
         frac = (x - self.track_rect.x) / max(1, self.track_rect.w)
         self.set_value(self._frac_to_value(frac))

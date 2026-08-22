@@ -102,6 +102,10 @@ class TweenManager:
                    and (attr is None or tw.attr == attr)
                    for tw in self._tweens)
 
+    def all_tweens(self) -> List[Tween]:
+        """当前活动补间快照（供引擎在画布缩放时同步坐标目标）。"""
+        return list(self._tweens)
+
     def update(self, dt: float) -> None:
         for tw in self._tweens:
             tw.update(dt)
