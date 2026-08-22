@@ -1,4 +1,4 @@
-"""无头冒烟测试：用 SDL dummy 驱动跑通引擎全部 API。
+﻿"""无头冒烟测试：用 SDL dummy 驱动跑通引擎全部 API。
 
 运行：python tests/smoke_test.py
 """
@@ -11,17 +11,19 @@ import sys
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 os.environ["SDL_AUDIODRIVER"] = "dummy"
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 
 import pygame  # noqa: E402
 
 from kokoro_engine import Engine  # noqa: E402
+from kokoro_engine.assets import (FALLBACK_BACKGROUNDS,  # noqa: E402
+                                  FALLBACK_CHARACTERS, AssetLibrary)
 
 
 def run_frames(eng: Engine, seconds: float, dt: float = 0.016,
                surface=None) -> None:
-    n = int(seconds / dt)
-    for _ in range(n):
+    for _ in range(int(seconds / dt)):
         eng.update(dt)
         assert surface is not None
         eng.draw(surface)
@@ -29,23 +31,22 @@ def run_frames(eng: Engine, seconds: float, dt: float = 0.016,
 
 def main() -> int:
     pygame.init()
-    eng = Engine(asset_dir="assets")
+    eng = Engine(asset_dir=os.path.join(ROOT, "assets"))
     surf = pygame.Surface(eng.size)
 
     print("== 背景 ==")
-    eng.set_background("bg_school", fade=0.0)
-    assert eng.stage.bg_name == "bg_school"
+    eng.set_background("bg/school", fade=0.0)
+    assert eng.stage.bg_name == "bg/school"
     run_frames(eng, 0.1, surface=surf)
-    eng.set_background("bg_night", fade=0.3)
+    eng.set_background("bg/night", fade=0.3)
     assert eng.stage.bg_transitioning
     run_frames(eng, 0.5, surface=surf)
     assert not eng.stage.bg_transitioning
-    assert eng.stage.bg_name == "bg_night"
+    assert eng.stage.bg_name == "bg/night"
     print("   背景设置/交叉淡入淡出 OK")
 
     print("== 立绘显示/淡入 ==")
-    spr = eng.show_sprite("akari", image="char_akari", pos="left",
-                          fade=0.5)
+    spr = eng.show_sprite("akari", image="fg/akari", pos="left", fade=0.5)
     assert spr.alpha == 0.0
     x_left, _ = eng.stage.preset_xy("left")
     assert abs(spr.x - x_left) < 0.01 and abs(spr.y - eng.size[1]) < 0.01
@@ -54,7 +55,7 @@ def main() -> int:
     print("   淡入完成 OK")
 
     print("== 自由坐标显示（替换同 id） ==")
-    spr2 = eng.show_sprite("akari", image="char_akari",
+    spr2 = eng.show_sprite("akari", image="fg/akari",
                            pos=(eng.size[0] * 0.4, eng.size[1] - 20),
                            fade=0.2)
     assert spr2 is not spr
@@ -81,8 +82,8 @@ def main() -> int:
     print("   fade_to / set_alpha OK")
 
     print("== 层级叠放 ==")
-    b = eng.show_sprite("b", image="char_hinata", pos="center", fade=0.0)
-    c = eng.show_sprite("c", image="char_sora", pos="right", fade=0.0)
+    eng.show_sprite("b", image="fg/hinata", pos="center", fade=0.0)
+    eng.show_sprite("c", image="fg/sora", pos="right", fade=0.0)
     ids_front_first = eng.stage.sprite_ids()
     assert ids_front_first[0] == "c"            # 后加的在前
     eng.bring_to_front("akari")
@@ -109,9 +110,9 @@ def main() -> int:
 
     print("== 时间轴序列 ==")
     steps = [
-        {"bg": "bg_room", "fade": 0.2},
-        {"show": "hero", "img": "char_akari", "pos": "left", "fade": 0.2},
-        {"show": "hero2", "img": "char_hinata", "pos": "right",
+        {"bg": "bg/room", "fade": 0.2},
+        {"show": "hero", "img": "fg/akari", "pos": "left", "fade": 0.2},
+        {"show": "hero2", "img": "fg/hinata", "pos": "right",
          "fade": 0.2, "z": 10},
         {"parallel": [
             {"move": "hero", "to": "center", "dur": 0.4},
@@ -134,11 +135,11 @@ def main() -> int:
     assert getattr(eng.stage, "bg_name_marker", False)
     assert not eng.stage.has_sprite("hero")
     assert not eng.stage.has_sprite("hero2")
-    assert eng.stage.bg_name == "bg_room"
+    assert eng.stage.bg_name == "bg/room"
     print(f"   序列播完（{guard} 帧内）OK")
 
     print("== 全局暂停 ==")
-    eng.show_sprite("p", image="char_sora", pos="left", fade=0.5)
+    eng.show_sprite("p", image="fg/sora", pos="left", fade=0.5)
     p_spr = eng.stage.get_sprite("p")
     eng.pause()
     a0 = p_spr.alpha
@@ -149,6 +150,80 @@ def main() -> int:
     assert p_spr.alpha == 255.0
     eng.remove_sprite("p")
     print("   暂停/继续 OK")
+
+    print("== 资源分类 bg//fg 与目录浏览 ==")
+    import shutil
+    import tempfile
+    tmp = tempfile.mkdtemp(prefix="kokoro_assets_")
+    try:
+        tdir = os.path.join(tmp, "assets")
+        for sub in ("bg/outdoor", "fg/main"):
+            os.makedirs(os.path.join(tdir, *sub.split("/")))
+        for rel in ("loose.png",                      # 分类外：GUI 不可见
+                    "bg/city.png", "bg/outdoor/park.png",
+                    "fg/hero.png", "fg/main/heroine.png"):
+            s = pygame.Surface((40, 30))
+            s.fill((hash(rel) % 255, 80, 120))
+            pygame.image.save(s, os.path.join(tdir, *rel.split("/")))
+
+        lib = AssetLibrary(tdir)
+        bgs = lib.all_images("bg")
+        fgs = lib.all_images("fg")
+        assert bgs == ["bg/city.png".replace(".png", ""),
+                       "bg/outdoor/park"] or set(bgs) == {"bg/city",
+                                                          "bg/outdoor/park"}
+        assert set(bgs) == {"bg/city", "bg/outdoor/park"}
+        assert set(fgs) == {"fg/hero", "fg/main/heroine"}
+        assert "loose" in lib.all_images()          # 无 kind 时全部可见
+
+        dirs_b, imgs_b = lib.list_dir("bg")
+        assert dirs_b == ["outdoor"] and imgs_b == ["bg/city"]
+        _, imgs_o = lib.list_dir("bg/outdoor")
+        assert imgs_o == ["bg/outdoor/park"]
+
+        # 分类树为空 → 按类兜底伪条目
+        empty_dir = os.path.join(tmp, "empty_assets")
+        os.makedirs(empty_dir)
+        lib_empty = AssetLibrary(empty_dir)
+        assert lib_empty.all_images("bg") == list(FALLBACK_BACKGROUNDS)
+        assert lib_empty.all_images("fg") == list(FALLBACK_CHARACTERS)
+
+        sx = lib.get("fg/hero")
+        th = lib.get_thumbnail("fg/hero", (24, 24))
+        assert th.get_width() <= 24 and th.get_height() <= 24
+        ph = lib.make_placeholder("任意名", (64, 48), kind="char")
+        assert ph.get_size() == (64, 48)
+        print(f"   bg={len(bgs)} fg={len(fgs)} 过滤/兜底/缩略图/kind OK")
+
+        # 浏览器子树限制：根下无 up、无法越出分类
+        from gui.widgets import ResourceBrowser
+        br_rect = pygame.Rect(0, 0, 400, 460)
+        browser = ResourceBrowser(br_rect, lib,
+                                  lambda target, key: None)
+        surf2 = pygame.Surface((800, 600))
+        browser.open("bg")
+        assert browser.rel_dir == "bg"
+        assert ("up", None) not in browser._entries()
+        dirs_e, _ = browser.assets.list_dir(browser.rel_dir)
+        assert dirs_e == ["outdoor"]
+        browser.rel_dir = "bg/outdoor"
+        browser.refresh_listing()
+        assert ("up", None) in browser._entries()
+        browser.draw(surf2)                          # 渲染不炸
+        browser.close()
+        print("   浏览器定位 bg 根 / 子树限制 / 绘制 OK")
+
+        # 引擎级：嵌套键直接可用；立绘兜底走 fg 子树
+        eng2 = Engine(asset_dir=tdir)
+        surf3 = pygame.Surface(eng2.size)
+        eng2.set_background("bg/outdoor/park", fade=0.0)
+        eng2.show_sprite("n", image=None, pos="center", fade=0.2)
+        run_frames(eng2, 0.4, surface=surf3)
+        assert eng2.stage.has_sprite("n")
+        assert eng2.stage.get_sprite("n").name == "fg/hero"   # fg 兜底首个
+        print("   引擎级嵌套键 + fg 兜底 OK")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
     state = eng.get_state()
     assert isinstance(state, dict) and "sprites" in state

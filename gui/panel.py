@@ -11,21 +11,22 @@ import pygame
 
 from kokoro_engine import Engine
 
-from .widgets import (THEME, Button, Cycler, Label, Slider, Widget,
-                      get_font)
+from .widgets import (THEME, Button, Cycler, Label, ResourceBrowser,
+                      Slider, Widget, get_font)
 
 PAD = 10
 ROW_H = 28
 SECTION_H = 30
 GAP = 6
+BROWSE_W = 56          # 行尾"浏览"按钮宽度
 
 
 # 演示用时间轴：覆盖 背景/显示/移动/透明度/层级/隐藏 全部能力
 DEMO_TIMELINE = [
-    {"bg": "bg_school", "fade": 1.0},
+    {"bg": "bg/school", "fade": 1.0},
     {"wait": 0.3},
-    {"show": "akari", "img": "char_akari", "pos": "left", "fade": 0.8},
-    {"show": "hinata", "img": "char_hinata", "pos": "right",
+    {"show": "akari", "img": "fg/akari", "pos": "left", "fade": 0.8},
+    {"show": "hinata", "img": "fg/hinata", "pos": "right",
      "fade": 0.8, "z": 5},
     {"parallel": [
         {"move": "akari", "to": "center", "dur": 1.6},
@@ -39,15 +40,19 @@ DEMO_TIMELINE = [
         {"alpha": "hinata", "value": 255, "dur": 1.2},
     ]},
     {"hide": "hinata", "fade": 1.0},
-    {"bg": "bg_night", "fade": 1.5},
+    {"bg": "bg/night", "fade": 1.5},
 ]
 
 
 class ControlPanel:
-    def __init__(self, engine: Engine, rect: pygame.Rect) -> None:
+    def __init__(self, engine: Engine, rect: pygame.Rect,
+                 browser_rect: Optional[pygame.Rect] = None) -> None:
         self.engine = engine
         self.rect = pygame.Rect(rect)
         self.widgets: List[Widget] = []
+        self.browser = ResourceBrowser(
+            browser_rect or self._default_browser_rect(),
+            engine.assets, self._on_browser_select)
 
         # 面板参数状态（仅是待提交的参数，不是演出逻辑）
         self.pending_bg: Optional[str] = None
@@ -61,6 +66,13 @@ class ControlPanel:
 
         self._build()
         self._status_text = ""
+
+    @property
+    def modal_open(self) -> bool:
+        return self.browser.modal_open
+
+    def _default_browser_rect(self) -> pygame.Rect:
+        return pygame.Rect(self.rect.x - 424, self.rect.y + 40, 400, 480)
 
     # ------------------------------------------------------------------ 布局
     def _add(self, w: Widget) -> Widget:
@@ -87,12 +99,18 @@ class ControlPanel:
 
         # ---------------------------------------------------------- 背景
         y = self._section("背景", y)
-        bg_names = self.engine.assets.backgrounds()
+        bg_names = self.engine.assets.all_images("bg")
         if self.pending_bg is None and bg_names:
             self.pending_bg = bg_names[0]
+        row = self._row(y)
+        cyc_rect = pygame.Rect(row.x, row.y, row.w - BROWSE_W - 6, row.h)
         self.cyc_bg = self._add(Cycler(
-            "背景图", self._row(y), bg_names, 0,
+            "背景图", cyc_rect, bg_names, 0,
             on_change=lambda v: setattr(self, "pending_bg", v)))
+        self.btn_browse_bg = self._add(Button(
+            "浏览",
+            pygame.Rect(row.right - BROWSE_W, row.y, BROWSE_W, row.h),
+            self._on_browse_bg))
         y += ROW_H + GAP
         self.sld_bg_fade = self._add(Slider(
             "切换时长", self._row(y), 0.0, 3.0, self.bg_fade,
@@ -105,12 +123,18 @@ class ControlPanel:
 
         # ------------------------------------------------ 立绘：显示与关闭
         y = self._section("立绘 · 显示 / 关闭", y)
-        chars = self.engine.assets.characters()
+        chars = self.engine.assets.all_images("fg")
         if self.show_img is None and chars:
             self.show_img = chars[0]
+        row = self._row(y)
+        cyc_rect = pygame.Rect(row.x, row.y, row.w - BROWSE_W - 6, row.h)
         self.cyc_img = self._add(Cycler(
-            "立绘图片", self._row(y), chars, 0,
+            "立绘图片", cyc_rect, chars, 0,
             on_change=lambda v: setattr(self, "show_img", v)))
+        self.btn_browse_img = self._add(Button(
+            "浏览",
+            pygame.Rect(row.right - BROWSE_W, row.y, BROWSE_W, row.h),
+            self._on_browse_img))
         y += ROW_H + GAP
         r = self._row(y)
         self.btn_show = self._add(Button(
@@ -209,13 +233,13 @@ class ControlPanel:
             self.cyc_sel.index = ids.index(sid)
 
     def _on_apply_bg(self) -> None:
-        name = self.pending_bg or \
-            (self.engine.assets.backgrounds() or [None])[0]
+        imgs = self.engine.assets.all_images("bg")
+        name = self.pending_bg or (imgs[0] if imgs else None)
         if name:
             self.engine.set_background(name, fade=self.bg_fade)
 
     def _auto_id(self, image: str) -> str:
-        base = image.replace("char_", "") or "sprite"
+        base = image.split("/")[-1] or "sprite"
         sid, i = base, 1
         while self.engine.stage.has_sprite(sid):
             i += 1
@@ -223,8 +247,8 @@ class ControlPanel:
         return sid
 
     def _on_show(self) -> None:
-        img = self.show_img or \
-            (self.engine.assets.characters() or [None])[0]
+        imgs = self.engine.assets.all_images("fg")
+        img = self.show_img or (imgs[0] if imgs else None)
         if not img:
             return
         sid = self._auto_id(img)
@@ -360,6 +384,9 @@ class ControlPanel:
 
     # ------------------------------------------------------------------ 事件
     def handle_event(self, event: pygame.event.Event) -> bool:
+        # 模态弹层最优先（它可能覆盖面板/舞台区域）
+        if self.browser.handle_event(event):
+            return True
         consumed = False
         for w in reversed(self.widgets):
             if w.handle_event(event):
@@ -368,6 +395,25 @@ class ControlPanel:
                                   pygame.MOUSEBUTTONUP):
                     break     # 单击只交给一个控件
         return consumed
+
+    def _on_browse_bg(self) -> None:
+        self.browser.open("bg")
+
+    def _on_browse_img(self) -> None:
+        self.browser.open("img")
+
+    def _on_browser_select(self, target: str, key: str) -> None:
+        """浏览器选中资源：写入对应槽位并同步 Cycler 显示。"""
+        kind = "bg" if target == "bg" else "fg"
+        cyc = self.cyc_bg if target == "bg" else self.cyc_img
+        opts = self.engine.assets.all_images(kind)
+        cyc.set_options(opts, keep_value=True)
+        if key in cyc.options:
+            cyc.index = cyc.options.index(key)
+        if target == "bg":
+            self.pending_bg = key
+        else:
+            self.show_img = key
 
     # ------------------------------------------------------------------ 绘制
     def draw(self, surface: pygame.Surface) -> None:
@@ -383,3 +429,5 @@ class ControlPanel:
                                  (self.rect.right - PAD, w.rect.top - 3))
         for w in self.widgets:
             w.draw(surface)
+        # 弹层最后画，保证在最上层
+        self.browser.draw(surface)

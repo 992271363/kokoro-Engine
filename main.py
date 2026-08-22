@@ -6,13 +6,19 @@
 
 from __future__ import annotations
 
+import os
 import sys
 
 import pygame
 
-from gui.panel import ControlPanel
-from gui.widgets import get_font
-from kokoro_engine import Engine
+ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, ROOT)
+
+from gui.panel import ControlPanel  # noqa: E402
+from gui.widgets import get_font  # noqa: E402
+from kokoro_engine import Engine  # noqa: E402
+
+ASSET_DIR = os.path.join(ROOT, "assets")
 
 WINDOW_SIZE = (1656, 728)
 STAGE_RECT = pygame.Rect(24, 56, 1152, 648)
@@ -31,13 +37,15 @@ def main() -> int:
     pygame.display.set_caption("kokoro-Engine v0.1 · galgame 演出系统")
     clock = pygame.time.Clock()
 
-    engine = Engine(asset_dir="assets")
+    engine = Engine(asset_dir=ASSET_DIR)
     stage_surface = pygame.Surface(engine.size)
-    panel = ControlPanel(engine, PANEL_RECT)
+    browser_rect = pygame.Rect(0, 0, 400, 460)
+    browser_rect.center = STAGE_RECT.center
+    panel = ControlPanel(engine, PANEL_RECT, browser_rect=browser_rect)
 
     # 开场演出：即时背景 + 左侧立绘淡入，保证首屏不空白
-    engine.set_background("bg_school", fade=0.0)
-    engine.show_sprite("akari", image="char_akari", pos="left", fade=1.2)
+    engine.set_background("bg/school", fade=0.0)
+    engine.show_sprite("akari", image="fg/akari", pos="left", fade=1.2)
     panel.select_sprite("akari")
 
     running = True
@@ -48,10 +56,15 @@ def main() -> int:
             if event.type == pygame.QUIT:
                 running = False
             elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_ESCAPE:
+                if panel.modal_open:
+                    panel.handle_event(event)      # 弹层打开时 ESC 先关弹层
+                elif event.key == pygame.K_ESCAPE:
                     running = False
                 elif event.key == pygame.K_SPACE:
                     panel._on_toggle_global()
+                continue
+            if panel.modal_open:
+                panel.handle_event(event)          # 模态期间鼠标事件全部给弹层
                 continue
             if event.type in (pygame.MOUSEBUTTONDOWN,
                               pygame.MOUSEBUTTONUP,

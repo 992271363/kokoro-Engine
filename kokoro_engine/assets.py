@@ -1,10 +1,12 @@
-"""资源库：图片加载、缓存与占位图生成。
+"""资源库：图片加载、缓存、目录浏览与占位图生成。
 
 约定：
-- assets/ 目录下任意子目录中的图片文件都会被扫描。
-- 文件名以 bg_ 开头视为背景，以 char_ 开头视为立绘；其余按扩展名归类失败时忽略。
-- 若请求的名字不存在对应文件，则程序化生成一张确定性占位图（同名同图），
-  保证无素材也能完整体验演出功能。
+- assets/ 目录（含任意子目录）中的图片都会被扫描。
+- 资源键 = 相对 assets/ 的路径（不含扩展名，统一用 / 分隔），
+  如根目录的 "bg_school"、子目录里的 "school/bg1"。
+- 分类由目录结构表达，不依赖文件名前缀；同名文件在不同子目录互不冲突。
+- 若请求的键不存在对应文件，则按调用方显式给出的 kind（"bg"/"char"/None）
+  程序化生成一张确定性占位图，保证无素材也能完整体验演出功能。
 """
 
 from __future__ import annotations
@@ -17,7 +19,12 @@ import pygame
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".webp")
 
-# 占位背景名 / 立绘图名（无素材时提供开箱即用的选择）
+# 目录分类约定：assets/bg/** = 背景，assets/fg/** = 立绘（前景）。
+# GUI 列表与浏览器按此分类；分类之外的文件不进 GUI（API 仍可加载）。
+BG_ROOT = "bg"
+FG_ROOT = "fg"
+
+# 分类子树完全为空时提供的占位伪条目（运行时生成，不落盘）
 FALLBACK_BACKGROUNDS = ["bg_school", "bg_room", "bg_street", "bg_night"]
 FALLBACK_CHARACTERS = ["char_akari", "char_hinata", "char_kaoru", "char_sora"]
 
@@ -45,40 +52,74 @@ class AssetLibrary:
     def __init__(self, asset_dir: str = "assets") -> None:
         self.asset_dir = asset_dir
         self._cache: Dict[str, pygame.Surface] = {}
+        self._thumb_cache: Dict[str, pygame.Surface] = {}
         self._file_index: Dict[str, str] = {}
         self._scan_dir()
 
     # ------------------------------------------------------------------ 扫描
     def _scan_dir(self) -> None:
+        """递归扫描；键为相对 asset_dir 的路径（无扩展名，/ 分隔）。"""
         self._file_index.clear()
         if not os.path.isdir(self.asset_dir):
             return
-        for root, _dirs, files in os.walk(self.asset_dir):
+        for root, dirs, files in os.walk(self.asset_dir):
+            dirs[:] = [d for d in dirs if not d.startswith(".")]
             for fn in files:
                 if fn.lower().endswith(IMAGE_EXTS):
-                    key = os.path.splitext(fn)[0]
                     path = os.path.join(root, fn)
+                    rel = os.path.relpath(path, self.asset_dir)
+                    key = os.path.splitext(rel)[0].replace(os.sep, "/")
                     self._file_index[key] = path
 
     def rescan(self) -> None:
+        self._cache.clear()          # 文件可能已增删，全尺寸缓存一并失效
         self._scan_dir()
 
-    # ------------------------------------------------------------------ 列表
-    def backgrounds(self) -> List[str]:
-        found = sorted(k for k in self._file_index if k.startswith("bg_"))
-        return found if found else list(FALLBACK_BACKGROUNDS)
+    # ------------------------------------------------------------------ 浏览
+    def all_images(self, kind: Optional[str] = None) -> List[str]:
+        """资源键列表（排序）。
 
-    def characters(self) -> List[str]:
-        found = sorted(k for k in self._file_index if k.startswith("char_"))
-        return found if found else list(FALLBACK_CHARACTERS)
+        kind="bg" → 仅 assets/bg/ 子树；"fg" → 仅 assets/fg/ 子树；
+        None → 全部。对应分类子树为空时回退到该类的占位伪条目。
+        """
+        found = sorted(self._file_index.keys())
+        if kind == "bg":
+            sub = [k for k in found if k.startswith(BG_ROOT + "/")]
+            return sub if sub else list(FALLBACK_BACKGROUNDS)
+        if kind == "fg":
+            sub = [k for k in found if k.startswith(FG_ROOT + "/")]
+            return sub if sub else list(FALLBACK_CHARACTERS)
+        return found
+
+    def list_dir(self, rel: str = "") -> Tuple[List[str], List[str]]:
+        """浏览器导航：返回 (rel 下子目录名列表, 直属图片键列表)，均已排序。"""
+        rel = (rel or "").strip("/").strip()
+        prefix = f"{rel}/" if rel else ""
+        dirs_set, images = set(), []
+        for key in self._file_index:
+            if not key.startswith(prefix):
+                continue
+            rest = key[len(prefix):]
+            if "/" in rest:
+                dirs_set.add(rest.split("/", 1)[0])
+            else:
+                images.append(key)
+        # 空目录兜底：在分类根且无文件时给出占位伪条目
+        if rel in (BG_ROOT, FG_ROOT) and not dirs_set and not images:
+            images = (list(FALLBACK_BACKGROUNDS) if rel == BG_ROOT
+                      else list(FALLBACK_CHARACTERS))
+        return sorted(dirs_set), sorted(images)
 
     def has_file(self, name: str) -> bool:
         return name in self._file_index
 
     # ------------------------------------------------------------------ 获取
     def get(self, name: str, size: Optional[Tuple[int, int]] = None,
-            alpha: bool = True) -> pygame.Surface:
-        """按名字取图。文件存在则加载（可缩放到 size），否则生成占位图。"""
+            alpha: bool = True, kind: Optional[str] = None) -> pygame.Surface:
+        """按键取图。文件存在则加载（可缩放到 size），否则按 kind 生成占位图。
+
+        kind: "bg"=背景渐变风, "char"=人形剪影, None=通用色块。
+        """
         cache_key = f"{name}|{size}|{alpha}"
         if cache_key in self._cache:
             return self._cache[cache_key]
@@ -89,22 +130,44 @@ class AssetLibrary:
                 surf = _safe_convert(surf, alpha)
                 if size is not None and surf.get_size() != tuple(size):
                     surf = pygame.transform.smoothscale(surf, size)
-            except pygame.error as exc:  # 文件损坏等情况回退到占位图
+            except (pygame.error, ValueError) as exc:  # 损坏/不支持的格式
                 print(f"[assets] 加载 {name} 失败({exc})，使用占位图。")
-                surf = self.make_placeholder(name, size or (800, 600), alpha)
+                surf = self.make_placeholder(name, size or (800, 600),
+                                             alpha, kind=kind)
         else:
-            surf = self.make_placeholder(name, size or (800, 600), alpha)
+            surf = self.make_placeholder(name, size or (800, 600),
+                                         alpha, kind=kind)
 
         self._cache[cache_key] = surf
         return surf
 
+    def get_thumbnail(self, name: str,
+                      box: Tuple[int, int] = (52, 52)) -> pygame.Surface:
+        """等比缩放到 box 内的缩略图（惰性生成并缓存）。"""
+        cache_key = f"{name}|{box}"
+        if cache_key in self._thumb_cache:
+            return self._thumb_cache[cache_key]
+        src = self.get(name, alpha=True)
+        w, h = src.get_size()
+        scale = min(box[0] / max(1, w), box[1] / max(1, h))
+        tw, th = max(1, int(w * scale)), max(1, int(h * scale))
+        try:
+            thumb = pygame.transform.smoothscale(src, (tw, th))
+        except (pygame.error, ValueError):
+            thumb = src
+        self._thumb_cache[cache_key] = thumb
+        return thumb
+
     # -------------------------------------------------------------- 占位生成
     def make_placeholder(self, name: str, size: Tuple[int, int],
-                         alpha: bool = True) -> pygame.Surface:
+                         alpha: bool = True,
+                         kind: Optional[str] = None) -> pygame.Surface:
+        """按显式 kind 生成占位图："bg"=背景渐变风，"char"=人形剪影，
+        None=通用色块。不依赖文件名前缀。"""
         w, h = size
-        if name.startswith("bg_"):
+        if kind == "bg":
             surf = self._placeholder_background(name, w, h)
-        elif name.startswith("char_"):
+        elif kind == "char":
             surf = self._placeholder_character(name, w, h)
         else:
             surf = self._placeholder_generic(name, w, h)

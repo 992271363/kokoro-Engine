@@ -59,13 +59,13 @@ class Engine:
         """加载立绘图并按舞台高度适配（等比，不放大只缩小）。"""
         max_h = int(self.size[1] * self.CHAR_MAX_H_FRAC)
         if image is None:
-            names = self.assets.characters()
-            image = names[0]
-        if not self.assets.has_file(image):
-            ph = max_h
-            pw = int(ph * self.CHAR_PLACEHOLDER_ASPECT)
-            return self.assets.get(image, size=(pw, ph))
-        native = self.assets.get(image)
+            imgs = self.assets.all_images("fg")
+            image = imgs[0] if imgs else None
+        ph_w = int(max_h * self.CHAR_PLACEHOLDER_ASPECT)
+        if image is None or not self.assets.has_file(image):
+            return self.assets.make_placeholder(
+                image or "character", (ph_w, max_h), kind="char")
+        native = self.assets.get(image, kind="char")
         scale = min(1.0, max_h / native.get_height())
         w = max(1, int(native.get_width() * scale))
         h = max(1, int(native.get_height() * scale))
@@ -76,7 +76,7 @@ class Engine:
     # ------------------------------------------------------------------ 背景
     def set_background(self, name: str, fade: float = 0.5,
                        easing: str = "ease_in_out") -> None:
-        surf = self.assets.get(name, size=self.size)
+        surf = self.assets.get(name, size=self.size, kind="bg")
         self.stage.set_background(surf, name, fade=fade, easing=easing)
 
     # ------------------------------------------------------------------ 立绘
@@ -94,8 +94,11 @@ class Engine:
         if z is None:
             z = self.stage.max_z() + 10.0 if self.stage.sprite_count else 0.0
         spr = self.stage.add_sprite(sid, surf, xy[0], xy[1], z=z)
-        img_name = image if image is not None else \
-            (self.assets.characters()[0] if self.assets.characters() else sid)
+        if image is not None:
+            img_name = image
+        else:
+            fgs = self.assets.all_images("fg")
+            img_name = fgs[0] if fgs else sid
         spr.name = img_name
 
         start_alpha = alpha_from if alpha_from is not None else (0.0 if fade > 0 else 255.0)
