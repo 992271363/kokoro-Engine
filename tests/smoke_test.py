@@ -252,6 +252,9 @@ def main() -> int:
 
     print("== 窗口缩放事件兼容 + 16:9 吸附 ==")
     import main as app
+    if sys.platform == "win32":
+        # DPI 感知必须在视频初始化前声明，否则桌面尺寸被缩放虚拟化
+        assert os.environ.get("SDL_WINDOWS_DPI_AWARENESS") == "permonitorv2"
     e_win = pygame.event.Event(pygame.WINDOWRESIZED, x=800, y=600)
     e_vid = pygame.event.Event(pygame.VIDEORESIZE, w=800, h=600)
     assert app.resize_event_size(e_win) == (800, 600)   # WINDOWRESIZED: x/y
@@ -299,6 +302,40 @@ def main() -> int:
     eng.resize_stage((1920, 1080))
     run_frames(eng, 0.1, surface=surf)
     print("   Cycler/应用回调/超屏与同档置灰 OK")
+
+    print("== GUI DPI 缩放 + 面板滚动 ==")
+    from gui import widgets as W
+    W.set_ui_scale(1.0)
+    base_h = W.get_font(14).get_height()
+    assert W.s(100) == 100 and W.UI_SCALE == 1.0
+    pnl_base = ControlPanel(eng, p_rect, desktop_size=(1920, 1080))
+    base_bottom = pnl_base.content_bottom - pnl_base.rect.y
+
+    W.set_ui_scale(1.5)                      # 模拟 150% Windows 缩放
+    assert W.s(100) == 150 and W.s(-3) >= 1
+    scaled_h = W.get_font(14).get_height()
+    assert abs(scaled_h / base_h - 1.5) < 0.25   # 字体像素随 DPI 放大
+    pnl_scaled = ControlPanel(eng, p_rect, desktop_size=(1920, 1080))
+    scaled_bottom = pnl_scaled.content_bottom - pnl_scaled.rect.y
+    assert abs(scaled_bottom / base_bottom - 1.5) < 0.15  # 行距等比放大
+    # 内容超出 → 滚动激活；滚轮生效；事件坐标平移正确
+    assert pnl_scaled.max_scroll() > 0
+    y0 = pnl_scaled.scroll_y
+    pnl_scaled.handle_event(pygame.event.Event(
+        pygame.MOUSEBUTTONDOWN, button=5, pos=(1300, 400)))
+    assert pnl_scaled.scroll_y > y0
+    ev = pnl_scaled._translate_event(pygame.event.Event(
+        pygame.MOUSEMOTION, pos=(1300, 500)))
+    assert ev.pos[1] == 500 - pnl_scaled.scroll_y
+    # 低矮面板（模拟低分辨率）同样可滚，绘制不炸
+    pnl_low = ControlPanel(eng, pygame.Rect(1200, 20, 432, 260),
+                           desktop_size=(1366, 768))
+    assert pnl_low.max_scroll() > 0
+    pnl_low.draw(surf)
+    pnl_scaled.draw(surf)
+    W.set_ui_scale(1.0)                      # 还原基准，后续测试不受影响
+    W.get_font(14)
+    print("   字体/行距缩放、滚动、事件平移、还原 OK")
 
     state = eng.get_state()
     assert isinstance(state, dict) and "sprites" in state

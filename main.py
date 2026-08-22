@@ -13,24 +13,63 @@ from __future__ import annotations
 import os
 import sys
 
-import pygame
-
 ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
+if sys.platform == "win32":
+    # 声明 DPI 感知（必须在任何 pygame 视频初始化之前）：
+    # 否则 Windows 显示缩放(125%/150%…)会把桌面尺寸虚拟化，
+    # 导致 pygame.display.Info() 报告错误的分辨率、窗口被位图拉伸发虚。
+    os.environ.setdefault("SDL_WINDOWS_DPI_AWARENESS", "permonitorv2")
+    try:
+        import ctypes
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)   # Win8.1+ 按显示器感知
+        except Exception:
+            ctypes.windll.user32.SetProcessDPIAware()         # Vista+ 兜底
+    except Exception:
+        pass
+
+import pygame  # noqa: E402
+
 from gui.panel import ControlPanel  # noqa: E402
-from gui.widgets import get_font  # noqa: E402
+from gui.widgets import get_font, set_ui_scale, s as ui_s  # noqa: E402
 from kokoro_engine import Engine  # noqa: E402
 
 ASSET_DIR = os.path.join(ROOT, "assets")
 
-MIN_WINDOW_SIZE = (960, 540)          # 最小窗口（16:9）
-STATUS_BAR_H = 32                     # 底部状态栏占位
-PANEL_W = 432
-MARGIN = 20
+MIN_WINDOW_SIZE = (960, 540)          # 最小窗口（16:9，物理像素）
+STATUS_BAR_H = 32                     # 底部状态栏占位（逻辑值，经 ui_s 缩放）
+PANEL_W = 432                         # 面板宽度（逻辑值）
+MARGIN = 20                           # 页边距（逻辑值）
 
 BG_COLOR = (16, 17, 20)
 WINDOW_TITLE = "kokoro-Engine v0.3 · galgame 演出系统"
+
+
+def detect_windows_ui_scale() -> float:
+    """读取 Windows 显示缩放（96DPI=100% 基准）。
+
+    仅用于编辑器 GUI（字体/控件/间距）的放大；
+    非 Windows / 检测失败时返回 1.0。
+    """
+    if sys.platform != "win32":
+        return 1.0
+    try:
+        import ctypes
+        dpi = int(ctypes.windll.user32.GetDpiForSystem())
+        if dpi > 0:
+            return max(1.0, dpi / 96.0)
+    except Exception:
+        pass
+    try:
+        import ctypes
+        sf = int(ctypes.windll.shcore.GetScaleFactorForDevice(0))
+        if sf > 0:
+            return max(1.0, sf / 100.0)
+    except Exception:
+        pass
+    return 1.0
 
 
 # ------------------------------------------------------------------ 几何工具
@@ -57,18 +96,24 @@ def choose_startup_preset(desk_w: int, desk_h: int) -> tuple:
 
 
 def compute_layout(win_w: int, win_h: int, canvas: tuple) -> tuple:
-    """返回 (panel_rect, disp_rect)。舞台显示区等比缩放并居中。"""
+    """返回 (panel_rect, disp_rect)。舞台显示区等比缩放并居中。
+
+    GUI 布局尺寸经 ui_s() 缩放；Stage 画布与显示缩放不受影响。
+    """
     cw, chh = canvas
-    panel_x = win_w - PANEL_W - MARGIN
-    panel_rect = pygame.Rect(panel_x, MARGIN, PANEL_W,
-                             max(220, win_h - MARGIN * 2))
-    avail = pygame.Rect(MARGIN, MARGIN,
-                        max(160, panel_x - MARGIN * 2 - 12),
-                        max(90, win_h - MARGIN - STATUS_BAR_H))
+    margin = ui_s(MARGIN)
+    panel_w = ui_s(PANEL_W)
+    status_h = ui_s(STATUS_BAR_H)
+    panel_x = win_w - panel_w - margin
+    panel_rect = pygame.Rect(panel_x, margin, panel_w,
+                             max(ui_s(220), win_h - margin * 2))
+    avail = pygame.Rect(margin, margin,
+                        max(ui_s(160), panel_x - margin * 2 - ui_s(12)),
+                        max(ui_s(90), win_h - margin - status_h))
     scale = min(avail.w / cw, avail.h / chh)
     disp = pygame.Rect(0, 0,
-                       max(64, int(cw * scale)),
-                       max(36, int(chh * scale)))
+                       max(ui_s(64), int(cw * scale)),
+                       max(ui_s(36), int(chh * scale)))
     disp.center = avail.center
     return panel_rect, disp
 
@@ -93,6 +138,9 @@ def _apply_window_size(w: int, h: int):
 # ------------------------------------------------------------------ 主程序
 def main() -> int:
     pygame.init()
+    # GUI 缩放：按 Windows DPI 放大编辑器字体/控件/间距（Stage 不受影响）
+    set_ui_scale(detect_windows_ui_scale())
+
     info = pygame.display.Info()
     preset0 = choose_startup_preset(info.current_w, info.current_h)
     screen = pygame.display.set_mode(preset0, pygame.RESIZABLE)
@@ -116,7 +164,8 @@ def main() -> int:
             screen = new_screen
 
     panel = ControlPanel(engine, panel_rect,
-                         browser_rect=pygame.Rect(0, 0, 400, 460),
+                         browser_rect=pygame.Rect(
+                             0, 0, ui_s(400), ui_s(460)),
                          on_preset_change=apply_preset,
                          desktop_size=(desktop_w, desktop_h))
 

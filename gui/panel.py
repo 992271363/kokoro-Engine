@@ -1,6 +1,8 @@
-"""右侧控制面板：只负责改参数、调用 Engine API、显示渲染状态。
+﻿"""右侧控制面板：只负责改参数、调用 Engine API、显示渲染状态。
 
 面板不实现任何演出逻辑；所有效果均由 kokoro_engine 的公开 API 完成。
+布局常量为 100% DPI 基准的逻辑值，经 widgets.s() 缩放；
+内容超出面板高度时可滚动（滚轮 / 拖拽右侧滚动条）。
 """
 
 from __future__ import annotations
@@ -11,9 +13,10 @@ import pygame
 
 from kokoro_engine import Engine
 
-from .widgets import (THEME, Button, Cycler, Label, ResourceBrowser,
-                      Slider, Widget, get_font)
+from .widgets import (UI_SCALE, THEME, Button, Cycler, Label,
+                      ResourceBrowser, Slider, Widget, get_font, s)
 
+# 以下均为 100% DPI 基准的逻辑尺寸，构建时经 s() 缩放
 PAD = 10
 ROW_H = 28
 SECTION_H = 30
@@ -75,6 +78,14 @@ class ControlPanel:
         self._status_text = ""
         self.browser_anchor: Optional[pygame.Rect] = None  # 主循环更新
 
+        # ---- 滚动状态（内容超出面板高度时启用）
+        self.scroll_y = 0
+        self._scroll_dragging = False
+        self._scroll_drag_off = 0
+        self._canvas_cache = None            # ((w, h, scale), Surface)
+        self._scrollbar_rect = pygame.Rect(0, 0, 0, 0)
+
+    # ------------------------------------------------------------------ 属性
     @property
     def modal_open(self) -> bool:
         return self.browser.modal_open
@@ -87,10 +98,11 @@ class ControlPanel:
             self.browser.rect = r
 
     def _default_browser_rect(self) -> pygame.Rect:
-        return pygame.Rect(self.rect.x - 424, self.rect.y + 40, 400, 480)
+        return pygame.Rect(self.rect.x - s(424), self.rect.y + s(40),
+                           s(400), s(480))
 
     def set_rect(self, rect) -> None:
-        """窗口尺寸/菜单栏显隐变化时更新面板矩形。
+        """窗口尺寸变化时更新面板矩形。
 
         所有控件整体平移，保持相对布局（Slider 内部几何同步）。
         """
@@ -103,6 +115,41 @@ class ControlPanel:
                     w.move_by(dx, dy)
                 else:
                     w.rect.move_ip(dx, dy)
+        self.scroll_y = max(0, min(self.scroll_y, self.max_scroll()))
+
+    # ------------------------------------------------------------ 滚动机制
+    def _content_height(self) -> int:
+        return max(self.rect.h,
+                   (self.content_bottom - self.rect.y) + s(PAD))
+
+    def max_scroll(self) -> int:
+        return max(0, self._content_height() - self.rect.h)
+
+    def scroll_by(self, delta: int) -> None:
+        self.scroll_y = max(0, min(self.scroll_y + delta, self.max_scroll()))
+
+    def _scrollbar_geometry(self):
+        """返回 (track_rect, thumb_y, thumb_h)；无滚动时为 None。"""
+        ms = self.max_scroll()
+        if ms <= 0:
+            return None
+        track = pygame.Rect(self.rect.right - s(PAD) - s(6),
+                            self.rect.y + 2, s(5), self.rect.h - 4)
+        thumb_h = max(s(28),
+                      int(track.h * self.rect.h / self._content_height()))
+        y = track.y + int((track.h - thumb_h) * self.scroll_y / ms)
+        return track, y, thumb_h
+
+    def _translate_event(self, event: pygame.event.Event):
+        """把屏幕坐标事件平移到面板内容坐标系（考虑 scroll_y）。"""
+        if self.scroll_y <= 0 or not hasattr(event, "pos"):
+            return event
+        pos = getattr(event, "pos", None)
+        if not (isinstance(pos, tuple) and len(pos) == 2):
+            return event
+        data = dict(event.dict)
+        data["pos"] = (pos[0], pos[1] - self.scroll_y)
+        return pygame.event.Event(event.type, **data)
 
     # ------------------------------------------------------------------ 布局
     def _add(self, w: Widget) -> Widget:
@@ -110,22 +157,23 @@ class ControlPanel:
         return w
 
     def _section(self, title: str, y: int) -> int:
-        r = pygame.Rect(self.rect.x + PAD, y, self.rect.w - 2 * PAD, SECTION_H)
-        self._add(Label("▎" + title, r.inflate((-2, -6)), size=15,
+        r = pygame.Rect(self.rect.x + s(PAD), y,
+                        self.rect.w - 2 * s(PAD), s(SECTION_H))
+        self._add(Label("▎" + title, r.inflate((-2, -s(6))), size=15,
                         color="accent"))
-        return y + SECTION_H
+        return y + s(SECTION_H)
 
     def _row(self, y: int) -> pygame.Rect:
-        return pygame.Rect(self.rect.x + PAD, y, self.rect.w - 2 * PAD, ROW_H)
+        return pygame.Rect(self.rect.x + s(PAD), y,
+                           self.rect.w - 2 * s(PAD), s(ROW_H))
 
     def _half(self, row: pygame.Rect, idx: int, total: int) -> pygame.Rect:
-        gap = 8
+        gap = s(8)
         w = (row.w - gap * (total - 1)) // total
         return pygame.Rect(row.x + idx * (w + gap), row.y, w, row.h)
 
     def _build(self) -> None:
-        y = self.rect.y + PAD
-        inner_w = self.rect.w - 2 * PAD
+        y = self.rect.y + s(PAD)
 
         # ------------------------------------------------------ 画布分辨率
         y = self._section("画布分辨率", y)
@@ -136,16 +184,18 @@ class ControlPanel:
         self.pending_resolution = cur if cur in self.res_options \
             else self.res_options[0]
         row = self._row(y)
-        cyc_rect = pygame.Rect(row.x, row.y, row.w - BROWSE_W - 6, row.h)
+        cyc_rect = pygame.Rect(row.x, row.y, row.w - s(BROWSE_W) - s(6),
+                               row.h)
         idx = self.res_options.index(self.pending_resolution)
         self.cyc_res = self._add(Cycler(
             "预设", cyc_rect, self.res_options, idx,
             on_change=lambda v: setattr(self, "pending_resolution", v)))
         self.btn_apply_res = self._add(Button(
             "应用",
-            pygame.Rect(row.right - BROWSE_W, row.y, BROWSE_W, row.h),
+            pygame.Rect(row.right - s(BROWSE_W), row.y, s(BROWSE_W),
+                        row.h),
             self._on_apply_resolution))
-        y += ROW_H + GAP + 8
+        y += s(ROW_H) + s(GAP) + s(8)
 
         # ---------------------------------------------------------- 背景
         y = self._section("背景", y)
@@ -153,23 +203,25 @@ class ControlPanel:
         if self.pending_bg is None and bg_names:
             self.pending_bg = bg_names[0]
         row = self._row(y)
-        cyc_rect = pygame.Rect(row.x, row.y, row.w - BROWSE_W - 6, row.h)
+        cyc_rect = pygame.Rect(row.x, row.y, row.w - s(BROWSE_W) - s(6),
+                               row.h)
         self.cyc_bg = self._add(Cycler(
             "背景图", cyc_rect, bg_names, 0,
             on_change=lambda v: setattr(self, "pending_bg", v)))
         self.btn_browse_bg = self._add(Button(
             "浏览",
-            pygame.Rect(row.right - BROWSE_W, row.y, BROWSE_W, row.h),
+            pygame.Rect(row.right - s(BROWSE_W), row.y, s(BROWSE_W),
+                        row.h),
             self._on_browse_bg))
-        y += ROW_H + GAP
+        y += s(ROW_H) + s(GAP)
         self.sld_bg_fade = self._add(Slider(
             "切换时长", self._row(y), 0.0, 3.0, self.bg_fade,
             on_change=lambda v: setattr(self, "bg_fade", v),
             fmt=lambda v: f"{v:.1f}s"))
-        y += ROW_H + GAP
+        y += s(ROW_H) + s(GAP)
         self.btn_apply_bg = self._add(Button(
             "应用背景（交叉淡入淡出）", self._row(y), self._on_apply_bg))
-        y += ROW_H + GAP + 8
+        y += s(ROW_H) + s(GAP) + s(8)
 
         # ------------------------------------------------ 立绘：显示与关闭
         y = self._section("立绘 · 显示 / 关闭", y)
@@ -177,15 +229,17 @@ class ControlPanel:
         if self.show_img is None and chars:
             self.show_img = chars[0]
         row = self._row(y)
-        cyc_rect = pygame.Rect(row.x, row.y, row.w - BROWSE_W - 6, row.h)
+        cyc_rect = pygame.Rect(row.x, row.y, row.w - s(BROWSE_W) - s(6),
+                               row.h)
         self.cyc_img = self._add(Cycler(
             "立绘图片", cyc_rect, chars, 0,
             on_change=lambda v: setattr(self, "show_img", v)))
         self.btn_browse_img = self._add(Button(
             "浏览",
-            pygame.Rect(row.right - BROWSE_W, row.y, BROWSE_W, row.h),
+            pygame.Rect(row.right - s(BROWSE_W), row.y, s(BROWSE_W),
+                        row.h),
             self._on_browse_img))
-        y += ROW_H + GAP
+        y += s(ROW_H) + s(GAP)
         r = self._row(y)
         self.btn_show = self._add(Button(
             "显示（淡入）", self._half(r, 0, 3), self._on_show))
@@ -193,62 +247,63 @@ class ControlPanel:
             "关闭（淡出）", self._half(r, 1, 3), self._on_hide))
         self.btn_remove = self._add(Button(
             "立即移除", self._half(r, 2, 3), self._on_remove))
-        y += ROW_H + GAP
+        y += s(ROW_H) + s(GAP)
         self.sld_fade_dur = self._add(Slider(
             "淡入淡出时长", self._row(y), 0.05, 3.0, self.fade_dur,
             on_change=lambda v: setattr(self, "fade_dur", v),
             fmt=lambda v: f"{v:.2f}s"))
-        y += ROW_H + GAP + 8
+        y += s(ROW_H) + s(GAP) + s(8)
 
         # ---------------------------------------------- 选中立绘：摆放等
         y = self._section("选中立绘 · 摆放 / 移动 / 叠放", y)
         self.lbl_sel = self._add(Label("当前未选择立绘", self._row(y),
                                        size=12, color="text_dim"))
-        y += ROW_H + GAP - 4
+        y += s(ROW_H) + s(GAP) - s(4)
         sw, sh = self.engine.size
         self.cyc_sel = self._add(Cycler(
-            "目标立绘", self._row(y), [], 0, on_change=self._on_pick_sprite))
-        y += ROW_H + GAP
+            "目标立绘", self._row(y), [], 0,
+            on_change=self._on_pick_sprite))
+        y += s(ROW_H) + s(GAP)
         self.cyc_place = self._add(Cycler(
             "摆放预设", self._row(y), ["left", "center", "right"], 1,
             on_change=self._on_place_preset))
-        y += ROW_H + GAP
+        y += s(ROW_H) + s(GAP)
         r = self._row(y)
         self.btn_place = self._add(Button(
             "放到预设位", self._half(r, 0, 2), self._on_place))
         self.btn_front = self._add(Button(
             "置顶", self._half(r, 1, 2), lambda: self._layer_op("front")))
-        y += ROW_H + GAP
+        y += s(ROW_H) + s(GAP)
         r = self._row(y)
         self.btn_back = self._add(Button(
             "置底", self._half(r, 0, 2), lambda: self._layer_op("back")))
         self.btn_updown = self._add(Button(
             "上移一层 ⇄ 下移一层", self._half(r, 1, 2),
             lambda: self._layer_op("toggle")))
-        y += ROW_H + GAP
+        y += s(ROW_H) + s(GAP)
         self.sld_x = self._add(Slider(
             "X 坐标", self._row(y), 0, float(sw), 0,
             on_change=self._on_drag_x, fmt=lambda v: f"{v:.0f}"))
-        y += ROW_H + GAP
+        y += s(ROW_H) + s(GAP)
         self.sld_y = self._add(Slider(
             "Y 脚线", self._row(y), 0, float(sh), 0,
             on_change=self._on_drag_y, fmt=lambda v: f"{v:.0f}"))
-        y += ROW_H + GAP + 8
+        y += s(ROW_H) + s(GAP) + s(8)
 
         # -------------------------------------------------------- 平滑移动
         y = self._section("平滑移动", y)
         self.cyc_move_to = self._add(Cycler(
             "移动到", self._row(y), ["left", "center", "right"], 2,
             on_change=lambda v: setattr(self, "move_to", v)))
-        y += ROW_H + GAP
+        y += s(ROW_H) + s(GAP)
         self.sld_move_dur = self._add(Slider(
             "移动时长", self._row(y), 0.1, 5.0, self.move_dur,
             on_change=lambda v: setattr(self, "move_dur", v),
             fmt=lambda v: f"{v:.2f}s"))
-        y += ROW_H + GAP
+        y += s(ROW_H) + s(GAP)
         self.btn_move = self._add(Button(
             "开始移动", self._row(y), self._on_move))
-        y += ROW_H + GAP + 8
+        y += s(ROW_H) + s(GAP) + s(8)
 
         # ---------------------------------------------------------- 时间轴
         y = self._section("时间轴序列", y)
@@ -259,13 +314,13 @@ class ControlPanel:
             "⏸ 暂停", self._half(r, 1, 3), self._on_timeline_pause))
         self.btn_tl_stop = self._add(Button(
             "■ 停止", self._half(r, 2, 3), self._on_timeline_stop))
-        y += ROW_H + GAP
+        y += s(ROW_H) + s(GAP)
         self.lbl_timeline = self._add(Label("", self._row(y), size=12,
                                             color="text_dim"))
-        y += ROW_H + GAP
+        y += s(ROW_H) + s(GAP)
         self.btn_pause_all = self._add(Button(
             "⏸ 全局暂停全部动画", self._row(y), self._on_toggle_global))
-        y += ROW_H + GAP
+        y += s(ROW_H) + s(GAP)
 
         self.content_bottom = y
 
@@ -278,7 +333,7 @@ class ControlPanel:
         """外部（如点击舞台拾取）设置当前选中立绘。"""
         self.sel_sid = sid
         self._sync_selection_ui()
-        ids = [s.id for s in self.engine.stage.sorted_sprites()]
+        ids = [spr.id for spr in self.engine.stage.sorted_sprites()]
         if sid in ids:
             self.cyc_sel.index = ids.index(sid)
 
@@ -320,7 +375,7 @@ class ControlPanel:
 
     def _on_pick_sprite(self, value: Optional[str]) -> None:
         self.sel_sid = value if value in {
-            s.id for s in self.engine.stage.sorted_sprites()} else None
+            spr.id for spr in self.engine.stage.sorted_sprites()} else None
         self._sync_selection_ui()
 
     def _on_place_preset(self, value: str) -> None:
@@ -384,69 +439,6 @@ class ControlPanel:
         self.btn_pause_all.text = ("▶ 继续全部动画" if paused
                                    else "⏸ 全局暂停全部动画")
 
-    # ------------------------------------------------------------------ 同步
-    def _sync_selection_ui(self) -> None:
-        """把选中立绘的实时值写进滑块，并刷新目标立绘列表。"""
-        ids = self.engine.stage.sprite_ids()          # 前→后
-        self.cyc_sel.set_options(ids, keep_value=True)
-        if self.sel_sid not in ids:
-            self.sel_sid = ids[0] if ids else None
-            self.cyc_sel.index = ids.index(self.sel_sid) \
-                if ids else 0
-        spr = self._selected_sprite()
-        if spr:
-            self.lbl_sel.text = (f"已选 {spr.id}（图:{spr.name} z={spr.z:g} "
-                                 f"alpha={spr.alpha:.0f}）")
-            self.btn_hide.enabled = True
-            self.btn_remove.enabled = True
-            self.btn_place.enabled = True
-            self.btn_move.enabled = True
-            for b in (self.btn_front, self.btn_back, self.btn_updown):
-                b.enabled = True
-            if not self.sld_x._dragging:
-                self.sld_x.set_value(spr.x)
-            if not self.sld_y._dragging:
-                self.sld_y.set_value(spr.y)
-        else:
-            self.lbl_sel.text = "当前未选择立绘"
-            for b in (self.btn_hide, self.btn_remove, self.btn_place,
-                      self.btn_move, self.btn_front, self.btn_back,
-                      self.btn_updown):
-                b.enabled = False
-
-    def update(self, dt: float) -> None:
-        self._sync_resolution_ui()
-        self._sync_selection_ui()
-
-        st = self.engine.get_state()
-        tl = st["timeline_state"]
-        prog = st["timeline_progress"]
-        parts = [
-            f"时间轴: {tl} {prog}",
-            f"全局{'已暂停' if st['paused'] else '运行中'}",
-        ]
-        if st["bg_transitioning"]:
-            parts.append("背景切换中…")
-        self.lbl_timeline.text = "  |  ".join(parts)
-
-        # 时间轴播放时禁用演示按钮，避免叠加播放
-        self.btn_demo.enabled = tl not in ("playing", "paused")
-        self.btn_tl_stop.enabled = tl != "idle"
-
-    # ------------------------------------------------------------------ 事件
-    def handle_event(self, event: pygame.event.Event) -> bool:
-        # 模态弹层最优先（它可能覆盖面板/舞台区域）
-        if self.browser.handle_event(event):
-            return True
-        consumed = False
-        for w in reversed(self.widgets):
-            if w.handle_event(event):
-                consumed = True
-                if event.type in (pygame.MOUSEBUTTONDOWN,
-                                  pygame.MOUSEBUTTONUP):
-                    break     # 单击只交给一个控件
-        return consumed
-
     def _on_browse_bg(self) -> None:
         self._recenter_browser()
         self.browser.open("bg")
@@ -491,19 +483,161 @@ class ControlPanel:
             and tuple(target) != tuple(self.engine.size)
             and self._preset_fits(target))
 
+    # ------------------------------------------------------------------ 同步
+    def _sync_selection_ui(self) -> None:
+        """把选中立绘的实时值写进滑块，并刷新目标立绘列表。"""
+        ids = self.engine.stage.sprite_ids()          # 前→后
+        self.cyc_sel.set_options(ids, keep_value=True)
+        if self.sel_sid not in ids:
+            self.sel_sid = ids[0] if ids else None
+            self.cyc_sel.index = ids.index(self.sel_sid) if ids else 0
+        spr = self._selected_sprite()
+        if spr:
+            self.lbl_sel.text = (f"已选 {spr.id}（图:{spr.name} z={spr.z:g} "
+                                 f"alpha={spr.alpha:.0f}）")
+            for b in (self.btn_hide, self.btn_remove, self.btn_place,
+                      self.btn_move, self.btn_front, self.btn_back,
+                      self.btn_updown):
+                b.enabled = True
+            if not self.sld_x._dragging:
+                self.sld_x.set_value(spr.x)
+            if not self.sld_y._dragging:
+                self.sld_y.set_value(spr.y)
+        else:
+            self.lbl_sel.text = "当前未选择立绘"
+            for b in (self.btn_hide, self.btn_remove, self.btn_place,
+                      self.btn_move, self.btn_front, self.btn_back,
+                      self.btn_updown):
+                b.enabled = False
+
+    def update(self, dt: float) -> None:
+        self._sync_resolution_ui()
+        self._sync_selection_ui()
+
+        st = self.engine.get_state()
+        tl = st["timeline_state"]
+        prog = st["timeline_progress"]
+        parts = [
+            f"时间轴: {tl} {prog}",
+            f"全局{'已暂停' if st['paused'] else '运行中'}",
+        ]
+        if st["bg_transitioning"]:
+            parts.append("背景切换中…")
+        self.lbl_timeline.text = "  |  ".join(parts)
+
+        # 时间轴播放时禁用演示按钮，避免叠加播放
+        self.btn_demo.enabled = tl not in ("playing", "paused")
+        self.btn_tl_stop.enabled = tl != "idle"
+        self.scroll_y = max(0, min(self.scroll_y, self.max_scroll()))
+
+    # ------------------------------------------------------------------ 事件
+    def handle_event(self, event: pygame.event.Event) -> bool:
+        # 模态弹层最优先（它可能覆盖面板/舞台区域）
+        if self.browser.handle_event(event):
+            return True
+        # 滚轮：悬停面板且内容可滚时滚动
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button in (4, 5):
+            if self.max_scroll() > 0 and self.rect.collidepoint(event.pos):
+                step = s(ROW_H) * 3
+                self.scroll_by(-step if event.button == 4 else step)
+                return True
+            return False
+        # 滚动条拖拽（屏幕坐标系，不平移）
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1 \
+                and self.max_scroll() > 0:
+            geo = self._scrollbar_geometry()
+            if geo is not None:
+                track, ty, th = geo
+                hit = pygame.Rect(track.x - s(4), track.y,
+                                  track.w + s(8), track.h)
+                if hit.collidepoint(event.pos):
+                    self._scroll_dragging = True
+                    self._scroll_drag_off = (ty + th // 2) - event.pos[1]
+                    return True
+        if self._scroll_dragging:
+            if event.type == pygame.MOUSEMOTION:
+                geo = self._scrollbar_geometry()
+                if geo is not None:
+                    track, _ty, th = geo
+                    ms = self.max_scroll()
+                    want = (event.pos[1] + self._scroll_drag_off - track.y)
+                    ratio = want / max(1, track.h - th)
+                    self.scroll_y = max(0, min(int(ratio * ms), ms))
+                return True
+            if event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                self._scroll_dragging = False
+                return True
+        # 其余事件平移后分发给控件
+        ev = self._translate_event(event)
+        consumed = False
+        for w in reversed(self.widgets):
+            if w.handle_event(ev):
+                consumed = True
+                if event.type in (pygame.MOUSEBUTTONDOWN,
+                                  pygame.MOUSEBUTTONUP):
+                    break     # 单击只交给一个控件
+        return consumed
+
+    # -------------------------------------------------------- 画布分辨率区
+    # （方法归属注释占位）
+
     # ------------------------------------------------------------------ 绘制
+    def _paint_widgets(self, target: pygame.Surface) -> None:
+        right = target.get_width() - s(PAD)
+        for w in self.widgets:
+            if isinstance(w, Label) and w.text.startswith("▎"):
+                pygame.draw.line(target, (40, 44, 54),
+                                 (w.rect.x - s(2), w.rect.top - s(3)),
+                                 (right, w.rect.top - s(3)))
+        for w in self.widgets:
+            w.draw(target)
+
     def draw(self, surface: pygame.Surface) -> None:
         pygame.draw.rect(surface, THEME["panel_bg"], self.rect)
         pygame.draw.line(surface, (45, 48, 58),
                          (self.rect.x, self.rect.y),
                          (self.rect.x, self.rect.bottom))
-        # 分隔线（按 section label 的位置）
-        for w in self.widgets:
-            if isinstance(w, Label) and w.text.startswith("▎"):
-                pygame.draw.line(surface, (40, 44, 54),
-                                 (w.rect.x - 2, w.rect.top - 3),
-                                 (self.rect.right - PAD, w.rect.top - 3))
-        for w in self.widgets:
-            w.draw(surface)
-        # 弹层最后画，保证在最上层
+        scrolled = self.max_scroll() > 0
+        old_clip = surface.get_clip()
+        surface.set_clip(self.rect)              # 裁剪到面板区
+        if scrolled:
+            ch = self._content_height()
+            key = (self.rect.w, ch, round(UI_SCALE, 3))
+            canvas = None
+            if self._canvas_cache is not None \
+                    and self._canvas_cache[0] == key:
+                canvas = self._canvas_cache[1]
+            else:
+                canvas = pygame.Surface((self.rect.w, ch), pygame.SRCALPHA)
+                self._canvas_cache = (key, canvas)
+            canvas.fill((0, 0, 0, 0))
+            dx, dy = -self.rect.x, -(self.rect.y + self.scroll_y)
+            for w in self.widgets:
+                if hasattr(w, "move_by"):
+                    w.move_by(dx, dy)
+                else:
+                    w.rect.move_ip(dx, dy)
+            try:
+                self._paint_widgets(canvas)
+            finally:
+                for w in self.widgets:
+                    if hasattr(w, "move_by"):
+                        w.move_by(-dx, -dy)
+                    else:
+                        w.rect.move_ip(-dx, -dy)
+            surface.blit(canvas, (self.rect.x, self.rect.y - self.scroll_y))
+        else:
+            self._paint_widgets(surface)
+        surface.set_clip(old_clip)
+
+        geo = self._scrollbar_geometry()
+        if geo is not None:
+            track, ty, th = geo
+            self._scrollbar_rect = pygame.Rect(track.x, ty, track.w, th)
+            pygame.draw.rect(surface, (36, 39, 48), track,
+                             border_radius=s(2))
+            pygame.draw.rect(surface, (90, 120, 200),
+                             self._scrollbar_rect, border_radius=s(2))
+
+        # 浏览器弹层最后画，保证在最上层
         self.browser.draw(surface)

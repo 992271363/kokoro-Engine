@@ -30,25 +30,46 @@ THEME = {
 
 _font_cache = {}
 
+# ------------------------------------------------------------------ UI 缩放
+# 以 100% DPI 为基准的逻辑尺寸 × UI_SCALE = 实际像素。
+# 只作用于编辑器 GUI（字体/控件/间距），不影响 Stage 逻辑画布与资源。
+UI_SCALE = 1.0
+
+
+def set_ui_scale(v: float) -> None:
+    """启动时设置一次全局 GUI 缩放（自动钳制到 [1.0, 2.5]）。"""
+    global UI_SCALE
+    UI_SCALE = max(1.0, min(2.5, float(v)))
+    _font_cache.clear()          # 字体像素缓存随缩放失效
+
+
+def s(v) -> int:
+    """按 UI_SCALE 缩放一个逻辑尺寸。"""
+    return max(1, int(round(float(v) * UI_SCALE)))
+
 
 def get_font(size: int = 16) -> pygame.font.Font:
-    """中文字体：微软雅黑 → 系统雅黑 → 默认字体。"""
-    key = ("ui", size)
+    """中文字体：微软雅黑 → 系统雅黑 → 默认字体。
+
+    入参为逻辑字号，实际像素 = s(size)，因此全项目文字随 UI 缩放。
+    """
+    px = s(size)
+    key = ("ui", px)
     if key not in _font_cache:
         if not pygame.font.get_init():
             pygame.font.init()
         font = None
         for candidate in (r"C:\Windows\Fonts\msyh.ttc",):
             try:
-                font = pygame.font.Font(candidate, size)
+                font = pygame.font.Font(candidate, px)
                 break
             except Exception:
                 continue
         if font is None:
             try:
-                font = pygame.font.SysFont("microsoftyahei", size)
+                font = pygame.font.SysFont("microsoftyahei", px)
             except Exception:
-                font = pygame.font.Font(None, size)
+                font = pygame.font.Font(None, px)
         _font_cache[key] = font
     return _font_cache[key]
 
@@ -159,9 +180,12 @@ class Slider(Widget):
         self.fmt = fmt
         self._dragging = False
         self.size = size
-        x = rect.x + self.LABEL_W
-        w = rect.w - self.LABEL_W - self.VALUE_W - 8
-        self.track_rect = pygame.Rect(x, rect.centery - 3, max(10, w), 6)
+        self.label_w = s(self.LABEL_W)
+        self.value_w = s(self.VALUE_W)
+        x = rect.x + self.label_w
+        w = rect.w - self.label_w - self.value_w - s(8)
+        self.track_rect = pygame.Rect(x, rect.centery - s(3),
+                                      max(s(10), w), s(6))
 
     # 值 <-> 滑块位置
     def _frac_to_value(self, frac: float) -> float:
@@ -212,10 +236,11 @@ class Slider(Widget):
             return
         dim = not self.enabled
         col_txt = THEME["disabled"] if dim else THEME["text_dim"]
-        _text(surface, self.label, (self.rect.x, self.rect.centery - 9),
+        _text(surface, self.label, (self.rect.x, self.rect.centery - s(9)),
               col_txt, self.size)
         tcol = (30, 32, 40) if dim else THEME["track"]
-        pygame.draw.rect(surface, tcol, self.track_rect, border_radius=3)
+        pygame.draw.rect(surface, tcol, self.track_rect,
+                         border_radius=s(3))
         frac = ((self.value - self.min_val) /
                 max(1e-9, self.max_val - self.min_val))
         frac = max(0.0, min(1.0, frac))
@@ -224,14 +249,17 @@ class Slider(Widget):
             fill_col = (60, 66, 80) if dim else THEME["accent"]
             pygame.draw.rect(surface, fill_col,
                              (self.track_rect.x, self.track_rect.y,
-                              fill_w, self.track_rect.h), border_radius=3)
+                              fill_w, self.track_rect.h),
+                             border_radius=s(3))
         cx = int(self.track_rect.x + fill_w)
+        r_thumb = s(7)
         thumb_col = (60, 66, 80) if dim else THEME["thumb"]
-        pygame.draw.circle(surface, thumb_col, (cx, self.track_rect.centery), 7)
+        pygame.draw.circle(surface, thumb_col,
+                           (cx, self.track_rect.centery), r_thumb)
         pygame.draw.circle(surface, (18, 20, 26),
-                           (cx, self.track_rect.centery), 7, 1)
+                           (cx, self.track_rect.centery), r_thumb, 1)
         _text(surface, self.fmt(self.value),
-              (self.rect.right - self.VALUE_W, self.rect.centery - 9),
+              (self.rect.right - self.value_w, self.rect.centery - s(9)),
               col_txt, self.size, right=True)
 
 
@@ -252,6 +280,8 @@ class Cycler(Widget):
         self.on_change = on_change
         self._left_hover = self._right_hover = False
         self.size = size
+        self.arrow_w = s(self.ARROW_W)
+        self.label_w = s(self.LABEL_W)
 
     @property
     def value(self) -> Optional[str]:
@@ -267,10 +297,12 @@ class Cycler(Widget):
 
     def _arrow_rects(self) -> Tuple[pygame.Rect, pygame.Rect]:
         cy = self.rect.centery
-        lx = self.rect.x + self.LABEL_W
-        vw = self.rect.right - lx - 2 * self.ARROW_W - 8
-        left = pygame.Rect(lx, cy - 11, self.ARROW_W, 22)
-        right = pygame.Rect(left.right + max(10, vw), cy - 11, self.ARROW_W, 22)
+        lx = self.rect.x + self.label_w
+        vw = self.rect.right - lx - 2 * self.arrow_w - s(8)
+        h = s(22)
+        left = pygame.Rect(lx, cy - h // 2, self.arrow_w, h)
+        right = pygame.Rect(left.right + max(s(10), vw), cy - h // 2,
+                            self.arrow_w, h)
         return left, right
 
     def _cycle(self, direction: int) -> None:
@@ -300,13 +332,13 @@ class Cycler(Widget):
     def draw(self, surface: pygame.Surface) -> None:
         if not self.visible:
             return
-        _text(surface, self.label, (self.rect.x, self.rect.centery - 9),
+        _text(surface, self.label, (self.rect.x, self.rect.centery - s(9)),
               THEME["text_dim"], self.size)
         lrect, rrect = self._arrow_rects()
         for rect, hovered in ((lrect, self._left_hover),
                               (rrect, self._right_hover)):
             col = THEME["btn"] if not hovered else THEME["btn_hover"]
-            pygame.draw.rect(surface, col, rect, border_radius=4)
+            pygame.draw.rect(surface, col, rect, border_radius=s(4))
             arrow = "<" if rect is lrect else ">"
             img = get_font(12).render(arrow, True, THEME["btn_text"])
             surface.blit(img, img.get_rect(center=rect.center))
@@ -336,10 +368,14 @@ class ResourceBrowser(Widget):
         self._dirs: List[str] = []
         self._images: List[str] = []
         self.visible = False                # 弹层默认关闭
-        self.btn_refresh = pygame.Rect(0, 0, self.BTN_W - 6,
-                                       self.TITLE_H - 10)
-        self.btn_close = pygame.Rect(0, 0, self.BTN_W - 6,
-                                     self.TITLE_H - 10)
+        self.title_h = s(self.TITLE_H)
+        self.row_h = s(self.ROW_H)
+        self.btn_w = s(self.BTN_W)
+        self.thumb_box = (s(self.THUMB[0]), s(self.THUMB[1]))
+        self.btn_refresh = pygame.Rect(0, 0,
+                                       max(s(20), self.btn_w - s(6)),
+                                       max(s(14), self.title_h - s(10)))
+        self.btn_close = pygame.Rect(self.btn_refresh)
         self._overlay_cache = {}
 
     @property
@@ -373,12 +409,14 @@ class ResourceBrowser(Widget):
         return out
 
     def _viewport(self) -> pygame.Rect:
-        return pygame.Rect(self.rect.x + 6, self.rect.y + self.TITLE_H + 4,
-                           self.rect.w - 12, self.rect.h - self.TITLE_H - 10)
+        return pygame.Rect(self.rect.x + s(6),
+                           self.rect.y + self.title_h + s(4),
+                           self.rect.w - s(12),
+                           self.rect.h - self.title_h - s(10))
 
     def max_scroll(self) -> int:
         n = len(self._entries())
-        return max(0, n * self.ROW_H - self._viewport().h)
+        return max(0, n * self.row_h - self._viewport().h)
 
     def clamp_scroll(self) -> None:
         self.scroll_y = max(0, min(self.scroll_y, self.max_scroll()))
@@ -386,8 +424,8 @@ class ResourceBrowser(Widget):
     def _row_rect(self, index: int) -> pygame.Rect:
         vp = self._viewport()
         return pygame.Rect(vp.x + 2,
-                           vp.y + index * self.ROW_H - self.scroll_y,
-                           vp.w - 8, self.ROW_H - 4)
+                           vp.y + index * self.row_h - self.scroll_y,
+                           vp.w - 8, self.row_h - 4)
 
     # ------------------------------------------------------------------ 事件
     def handle_event(self, event: pygame.event.Event) -> bool:
@@ -398,20 +436,21 @@ class ResourceBrowser(Widget):
             return True
         if event.type == pygame.MOUSEBUTTONDOWN and \
                 event.button in (4, 5):
-            step = self.ROW_H * 2
+            step = self.row_h * 2
             self.scroll_y += (-step) if event.button == 4 else step
             self.clamp_scroll()
             return True
         if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
             title_bar = pygame.Rect(self.rect.x, self.rect.y,
-                                    self.rect.w, self.TITLE_H)
+                                    self.rect.w, self.title_h)
             if title_bar.collidepoint(event.pos):
                 for btn, cb in ((self.btn_close, self.close),
                                 (self.btn_refresh, self.refresh_listing)):
-                    r = btn.move(self.rect.right - self.BTN_W + 3
-                                 if btn is self.btn_close else
-                                 self.rect.right - 2 * self.BTN_W + 3,
-                                 self.rect.y + 5)
+                    r = btn.move(
+                        (self.rect.right - self.btn_w + s(3))
+                        if btn is self.btn_close else
+                        (self.rect.right - 2 * self.btn_w + s(3)),
+                        self.rect.y + s(5))
                     if r.collidepoint(event.pos):
                         cb()
                         return True
@@ -420,7 +459,7 @@ class ResourceBrowser(Widget):
                 self.close()                     # 点外部关闭
                 return True
             idx = ((event.pos[1] - self._viewport().y + self.scroll_y)
-                   // self.ROW_H)
+                   // self.row_h)
             entries = self._entries()
             if 0 <= idx < len(entries):
                 kind, value = entries[idx]
@@ -456,53 +495,59 @@ class ResourceBrowser(Widget):
 
     @staticmethod
     def _draw_folder_icon(surface: pygame.Surface, center) -> None:
-        x, y = center[0] - 22, center[1] - 14
-        body = pygame.Rect(x, y + 4, 44, 28)
-        tab = pygame.Rect(x, y, 18, 8)
+        w, h = s(44), s(28)
+        x, y = center[0] - w // 2, center[1] - h // 2 - s(4)
+        tab_h = s(8)
+        body = pygame.Rect(x, y + tab_h, w, h)
+        tab = pygame.Rect(x, y, s(18), tab_h)
         pygame.draw.rect(surface, (96, 130, 200), tab,
-                         border_top_left_radius=3,
-                         border_top_right_radius=3)
+                         border_top_left_radius=s(3),
+                         border_top_right_radius=s(3))
         pygame.draw.rect(surface, (120, 160, 235), body,
-                         border_radius=3)
+                         border_radius=s(3))
 
     def draw(self, surface: pygame.Surface) -> None:
         if not self.visible:
             return
         surface.blit(self._get_overlay(surface.get_size()), (0, 0))
 
-        pygame.draw.rect(surface, (30, 32, 40), self.rect, border_radius=8)
+        pygame.draw.rect(surface, (30, 32, 40), self.rect,
+                         border_radius=s(8))
         pygame.draw.rect(surface, (90, 110, 160), self.rect, 1,
-                         border_radius=8)
+                         border_radius=s(8))
 
         # ---- 标题栏：面包屑 + 刷新/关闭
         bar = pygame.Rect(self.rect.x, self.rect.y, self.rect.w,
-                          self.TITLE_H)
+                          self.title_h)
         pygame.draw.rect(surface, (38, 42, 54), bar,
-                         border_top_left_radius=8,
-                         border_top_right_radius=8)
-        cr = self.btn_close.move(self.rect.right - self.BTN_W + 3,
-                                 self.rect.y + 5)
-        rr = self.btn_refresh.move(self.rect.right - 2 * self.BTN_W + 3,
-                                   self.rect.y + 5)
+                         border_top_left_radius=s(8),
+                         border_top_right_radius=s(8))
+        cr = self.btn_close.move(self.rect.right - self.btn_w + s(3),
+                                 self.rect.y + s(5))
+        rr = self.btn_refresh.move(self.rect.right - 2 * self.btn_w + s(3),
+                                   self.rect.y + s(5))
         for rect, label in ((cr, "X"), (rr, "刷新")):
-            pygame.draw.rect(surface, THEME["btn"], rect, border_radius=4)
+            pygame.draw.rect(surface, THEME["btn"], rect,
+                             border_radius=s(4))
             col = THEME["btn_text"]
             if label == "X":
-                pygame.draw.line(surface, col, (rect.centerx - 5,
-                                                rect.centery - 5),
-                                 (rect.centerx + 5, rect.centery + 5), 2)
-                pygame.draw.line(surface, col, (rect.centerx + 5,
-                                                rect.centery - 5),
-                                 (rect.centerx - 5, rect.centery + 5), 2)
+                arm = max(3, s(5))
+                lw = max(1, int(s(2) / 1.5))
+                pygame.draw.line(surface, col, (rect.centerx - arm,
+                                                rect.centery - arm),
+                                 (rect.centerx + arm, rect.centery + arm), lw)
+                pygame.draw.line(surface, col, (rect.centerx + arm,
+                                                rect.centery - arm),
+                                 (rect.centerx - arm, rect.centery + arm), lw)
             else:
                 img = get_font(12).render(label, True, col)
                 surface.blit(img, img.get_rect(center=rect.center))
 
         crumb = "assets/" + (self.rel_dir + "/" if self.rel_dir else "")
         img = get_font(13).render(crumb, True, THEME["text_dim"])
-        surface.blit(img, (self.rect.x + 10,
+        surface.blit(img, (self.rect.x + s(10),
                            self.rect.y +
-                           (self.TITLE_H - img.get_height()) // 2))
+                           (self.title_h - img.get_height()) // 2))
 
         # ---- 条目列表（裁剪到视口）
         vp = self._viewport()
@@ -514,48 +559,50 @@ class ResourceBrowser(Widget):
             if row.bottom < vp.y or row.top > vp.bottom:
                 continue
             if i % 2 == 1:
-                pygame.draw.rect(surface, (36, 39, 48), row, border_radius=4)
-            tx = row.x + 64
+                pygame.draw.rect(surface, (36, 39, 48), row,
+                                 border_radius=s(4))
+            tx = row.x + s(64)
+            icx = row.x + s(30)
             if kind == "up":
                 pygame.draw.circle(surface, (120, 126, 140),
-                                   (row.x + 30, row.centery), 16, 2)
+                                   (icx, row.centery), s(16), 2)
                 arr = get_font(16).render("<", True, (200, 205, 215))
                 surface.blit(arr, arr.get_rect(
-                    center=(row.x + 30, row.centery)))
-                _text(surface, ".. 返回上级", (tx, row.centery - 9),
+                    center=(icx, row.centery)))
+                _text(surface, ".. 返回上级", (tx, row.centery - s(9)),
                       THEME["text_dim"])
             elif kind == "dir":
-                self._draw_folder_icon(surface,
-                                       (row.x + 30, row.centery))
-                _text(surface, f"[分类] {value}", (tx, row.centery - 9),
+                self._draw_folder_icon(surface, (icx, row.centery))
+                _text(surface, f"[分类] {value}", (tx, row.centery - s(9)),
                       THEME["text"])
             else:
                 try:
-                    thumb = self.assets.get_thumbnail(value, self.THUMB)
+                    thumb = self.assets.get_thumbnail(value, self.thumb_box)
                     surface.blit(thumb, thumb.get_rect(
-                        center=(row.x + 30, row.centery)))
+                        center=(icx, row.centery)))
                     pygame.draw.rect(surface, (70, 76, 92),
                                      thumb.get_rect(
-                                         center=(row.x + 30, row.centery)),
+                                         center=(icx, row.centery)),
                                      1)
                 except Exception:
                     pass
                 name = value.split("/")[-1]
                 sub = value.rsplit("/", 1)[0] if "/" in value else ""
                 tcol = (170, 176, 190)
-                _text(surface, name, (tx, row.centery - 12), THEME["text"])
+                _text(surface, name, (tx, row.centery - s(12)), THEME["text"])
                 if sub:
-                    _text(surface, sub, (tx, row.centery + 7), tcol, 11)
+                    _text(surface, sub, (tx, row.centery + s(7)), tcol, 11)
         surface.set_clip(old_clip)
 
         # ---- 滚动条
-        total_h = len(entries) * self.ROW_H
+        total_h = len(entries) * self.row_h
         if total_h > vp.h:
             frac = vp.h / total_h
-            thumb_h = max(24, int(vp.h * frac))
+            thumb_h = max(s(24), int(vp.h * frac))
             pos = int((vp.h - thumb_h) *
                       (self.scroll_y / max(1, self.max_scroll())))
+            bar_w = s(4)
             pygame.draw.rect(surface, (50, 54, 66),
-                             (vp.right - 4, vp.y, 4, vp.h))
+                             (vp.right - bar_w, vp.y, bar_w, vp.h))
             pygame.draw.rect(surface, (110, 150, 230),
-                             (vp.right - 4, vp.y + pos, 4, thumb_h))
+                             (vp.right - bar_w, vp.y + pos, bar_w, thumb_h))
