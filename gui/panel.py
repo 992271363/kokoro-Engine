@@ -70,9 +70,12 @@ class ControlPanel:
         self.show_img: Optional[str] = None
         self.fade_dur = 0.8
         self.place_preset = "center"
+        # 新立绘默认距离档：跟随"标准"档位值
+        self.pending_scale = dict(Engine.SCALE_LEVELS)["标准"]
         self.move_to = "right"
         self.move_dur = 1.5
         self.sel_sid: Optional[str] = None
+        self._last_canvas = tuple(engine.size)
 
         self._build()
         self._status_text = ""
@@ -268,6 +271,13 @@ class ControlPanel:
             "摆放预设", self._row(y), ["left", "center", "right"], 1,
             on_change=self._on_place_preset))
         y += s(ROW_H) + s(GAP)
+        dist_labels = [name for name, _k in Engine.SCALE_LEVELS]
+        self._dist_map = dict(Engine.SCALE_LEVELS)
+        self.cyc_dist = self._add(Cycler(
+            "距离档位", self._row(y), dist_labels,
+            max(0, dist_labels.index("标准")),
+            on_change=self._on_dist_level))
+        y += s(ROW_H) + s(GAP)
         r = self._row(y)
         self.btn_place = self._add(Button(
             "放到预设位", self._half(r, 0, 2), self._on_place))
@@ -282,11 +292,11 @@ class ControlPanel:
             lambda: self._layer_op("toggle")))
         y += s(ROW_H) + s(GAP)
         self.sld_x = self._add(Slider(
-            "X 坐标", self._row(y), 0, float(sw), 0,
+            "X 坐标", self._row(y), -float(sw), float(sw) * 2, 0,
             on_change=self._on_drag_x, fmt=lambda v: f"{v:.0f}"))
         y += s(ROW_H) + s(GAP)
         self.sld_y = self._add(Slider(
-            "Y 脚线", self._row(y), 0, float(sh), 0,
+            "Y 脚线", self._row(y), -float(sh), float(sh) * 2, 0,
             on_change=self._on_drag_y, fmt=lambda v: f"{v:.0f}"))
         y += s(ROW_H) + s(GAP) + s(8)
 
@@ -360,6 +370,8 @@ class ControlPanel:
         self.engine.show_sprite(sid, image=img,
                                 pos=self.place_preset,
                                 fade=self.fade_dur)
+        if abs(self.pending_scale - 1.0) > 1e-6:
+            self.engine.set_sprite_scale(sid, self.pending_scale)
         self.sel_sid = sid
         self._sync_selection_ui()
 
@@ -381,6 +393,14 @@ class ControlPanel:
     def _on_place_preset(self, value: str) -> None:
         self.place_preset = value
 
+    def _on_dist_level(self, label: str) -> None:
+        """距离档位：选档立即作用于当前选中立绘，并作为新立绘默认档。"""
+        k = self._dist_map.get(label, 1.0)
+        self.pending_scale = k
+        spr = self._selected_sprite()
+        if spr:
+            self.engine.set_sprite_scale(spr.id, k)
+
     def _on_place(self) -> None:
         spr = self._selected_sprite()
         if not spr:
@@ -389,6 +409,7 @@ class ControlPanel:
         self.engine.tweens.kill(spr, "x")
         self.engine.tweens.kill(spr, "y")
         spr.x, spr.y = x, yb
+        spr.snap_render()                # 瞬时摆放：插值基准立即贴合
 
     def _layer_op(self, op: str) -> None:
         spr = self._selected_sprite()
@@ -410,12 +431,14 @@ class ControlPanel:
         if spr:
             self.engine.tweens.kill(spr, "x")
             spr.x = v
+            spr.snap_render()
 
     def _on_drag_y(self, v: float) -> None:
         spr = self._selected_sprite()
         if spr:
             self.engine.tweens.kill(spr, "y")
             spr.y = v
+            spr.snap_render()
 
     def _on_move(self) -> None:
         spr = self._selected_sprite()
@@ -488,13 +511,18 @@ class ControlPanel:
         """把选中立绘的实时值写进滑块，并刷新目标立绘列表。"""
         ids = self.engine.stage.sprite_ids()          # 前→后
         self.cyc_sel.set_options(ids, keep_value=True)
-        if self.sel_sid not in ids:
-            self.sel_sid = ids[0] if ids else None
-            self.cyc_sel.index = ids.index(self.sel_sid) if ids else 0
         spr = self._selected_sprite()
         if spr:
-            self.lbl_sel.text = (f"已选 {spr.id}（图:{spr.name} z={spr.z:g} "
-                                 f"alpha={spr.alpha:.0f}）")
+            self.lbl_sel.text = (
+                f"已选 {spr.id}（图:{spr.name} z={spr.z:g} "
+                f"alpha={spr.alpha:.0f} 缩放{spr.scale:.0%}）")
+            # 距离档位回同步（取与当前缩放最近的档）
+            best_i, best_d = 0, 1e9
+            for i, (_n, k) in enumerate(Engine.SCALE_LEVELS):
+                d = abs(k - spr.scale)
+                if d < best_d:
+                    best_i, best_d = i, d
+            self.cyc_dist.index = best_i
             for b in (self.btn_hide, self.btn_remove, self.btn_place,
                       self.btn_move, self.btn_front, self.btn_back,
                       self.btn_updown):
@@ -511,6 +539,13 @@ class ControlPanel:
                 b.enabled = False
 
     def update(self, dt: float) -> None:
+        # 画布分辨率变化后刷新 X/Y 滑块量程（允许越出画布 ±100%）
+        cur_canvas = tuple(self.engine.size)
+        if cur_canvas != self._last_canvas:
+            w, h = cur_canvas
+            self.sld_x.set_range(-float(w), float(w) * 2)
+            self.sld_y.set_range(-float(h), float(h) * 2)
+            self._last_canvas = cur_canvas
         self._sync_resolution_ui()
         self._sync_selection_ui()
 

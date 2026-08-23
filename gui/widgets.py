@@ -199,6 +199,12 @@ class Slider(Widget):
         if fire and changed:
             self.on_change(self.value)
 
+    def set_range(self, min_val: float, max_val: float) -> None:
+        """更新量程（如画布分辨率变化后），当前值按新范围钳制。"""
+        self.min_val = float(min_val)
+        self.max_val = float(max_val)
+        self.set_value(self.value)
+
     def move_by(self, dx: float, dy: float) -> None:
         """整体平移（含内部轨道几何），供面板重锚定使用。"""
         if dx or dy:

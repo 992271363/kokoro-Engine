@@ -16,6 +16,16 @@ PRESET_X_FRAC: Dict[str, float] = {
     "right": 0.75,
 }
 
+# 预设位作用的轴：水平预设只动 X，垂直预设只动 Y（预留 top/bottom）
+PRESET_AXIS: Dict[str, str] = {
+    "left": "x",
+    "center": "x",
+    "right": "x",
+}
+
+# 舞台清屏底色（无背景时的空场颜色）
+STAGE_CLEAR = (12, 12, 16)
+
 
 class Stage:
     def __init__(self, size: Tuple[int, int], tweens) -> None:
@@ -38,6 +48,27 @@ class Stage:
         if frac is None:
             raise ValueError(f"未知预设位: {preset}")
         return self.w * frac, float(self.h)
+
+    def resolve_axis_target(self, to):
+        """把移动目标解析为单轴或双轴语义（供 move 类补间使用）。
+
+        返回：
+        - ("x", 目标x)   —— 水平预设 left/center/right，只动 X；
+        - ("y", 目标y)   —— 垂直预设（预留 top/bottom），只动 Y；
+        - ("xy", (x,y))  —— 显式二维目标，双轴同时补间。
+        """
+        if isinstance(to, str):
+            axis = PRESET_AXIS.get(to)
+            if axis == "x":
+                return "x", self.w * PRESET_X_FRAC[to]
+            if axis == "y":
+                raise ValueError(f"垂直预设尚未定义: {to}")
+            raise ValueError(f"未知预设位: {to}")
+        try:
+            x, y = float(to[0]), float(to[1])
+        except (TypeError, ValueError, IndexError) as exc:
+            raise ValueError(f"移动目标格式错误: {to!r}") from exc
+        return "xy", (x, y)
 
     # ------------------------------------------------------------------ 背景
     def set_background(self, surface: pygame.Surface, name: str,
@@ -151,6 +182,15 @@ class Stage:
         for spr in self._sprites.values():
             spr.x *= s
             spr.y *= s
+            # 距离缩放的采样基准同步缩放，保持 set_scale 相对倍率不变
+            bw = max(1, int(spr.base_surface.get_width() * s + 0.5))
+            bh = max(1, int(spr.base_surface.get_height() * s + 0.5))
+            if (bw, bh) != spr.base_surface.get_size():
+                try:
+                    spr.base_surface = pygame.transform.smoothscale(
+                        spr.base_surface, (bw, bh))
+                except (pygame.error, ValueError):
+                    pass
             w = max(1, int(spr.surface.get_width() * s + 0.5))
             h = max(1, int(spr.surface.get_height() * s + 0.5))
             if (w, h) != spr.surface.get_size():
@@ -172,16 +212,37 @@ class Stage:
         self._bg_progress = 1.0
 
     # ------------------------------------------------------------------ 绘制
-    def draw(self, target: pygame.Surface) -> None:
-        target.fill((12, 12, 16))
-        if self._bg_cur is not None:
-            if self._bg_prev is not None:
-                target.blit(self._bg_prev, (0, 0))
-                overlay = self._bg_cur
-                overlay.set_alpha(int(max(0.0, min(1.0, self._bg_progress)) * 255))
-                target.blit(overlay, (0, 0))
-                overlay.set_alpha(255)
+    def background_layers(self) -> List[Tuple[pygame.Surface, int]]:
+        """当前应绘制的背景层 [(surface, alpha0~255)]，供渲染器合成。"""
+        layers: List[Tuple[pygame.Surface, int]] = []
+        if self._bg_prev is not None:
+            layers.append((self._bg_prev, 255))
+            if self._bg_cur is not None:
+                a = int(max(0.0, min(1.0, self._bg_progress)) * 255)
+                layers.append((self._bg_cur, a))
+        elif self._bg_cur is not None:
+            layers.append((self._bg_cur, 255))
+        return layers
+
+    def draw(self, target: pygame.Surface,
+             render_alpha: float = 1.0) -> None:
+        """绘制舞台。
+
+        render_alpha < 1.0 时，立绘位置在上一/当前逻辑帧之间插值
+        （固定步长补帧渲染）；默认 1.0 与既有行为一致。
+        """
+        target.fill(STAGE_CLEAR)
+        for surf, a in self.background_layers():
+            if a >= 255:
+                target.blit(surf, (0, 0))
             else:
-                target.blit(self._bg_cur, (0, 0))
+                surf.set_alpha(a)
+                target.blit(surf, (0, 0))
+                surf.set_alpha(255)
+        interp = max(0.0, min(1.0, render_alpha))
         for spr in self.sorted_sprites():
-            spr.draw(target)
+            if interp >= 1.0:
+                spr.draw(target)
+            else:
+                rx, ry = spr.render_pos(interp)
+                spr.draw_at(target, rx, ry)

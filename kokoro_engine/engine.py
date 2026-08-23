@@ -38,6 +38,15 @@ class Engine:
         (2560, 1440),
     ]
 
+    # 立绘距离档位（相对基准尺寸的倍率），模拟远近景
+    SCALE_LEVELS = [
+        ("极远", 0.75),
+        ("远", 1.0),
+        ("标准", 1.25),
+        ("近", 1.5),
+        ("特写", 1.75),
+    ]
+
     def __init__(self, stage_size: Tuple[int, int] = DEFAULT_STAGE_SIZE,
                  asset_dir: str = "assets") -> None:
         if not pygame.get_init():
@@ -50,6 +59,10 @@ class Engine:
         self.timeline = TimelinePlayer()
         self.timeline.engine = self
         self.paused = False            # 全局暂停：冻结所有动画与时间轴
+        # 固定步长补帧（advance 驱动）
+        self.sim_step = 1.0 / self.SIM_HZ
+        self._acc = 0.0
+        self.render_alpha = 1.0
 
     # -------------------------------------------------------------- 内部工具
     @property
@@ -164,11 +177,27 @@ class Engine:
 
     def move_sprite(self, sid: str, to: PosLike = "center",
                     dur: float = 1.0, easing: str = "ease_in_out") -> None:
+        """移动立绘（轴感知语义）。
+
+        - 水平预设 left/center/right：只补间 X，Y 保持当前值；
+        - 垂直预设（预留 top/bottom）：只补间 Y，X 保持当前值；
+        - 显式 (x, y)：双轴同时补间。
+        单轴移动不会为另一轴创建/重置任何补间；若另一轴恰有进行中的
+        补间（如 parallel 分支），两者并行合成、互不打断。
+        """
         spr = self.stage.require_sprite(sid)
-        xy = self._resolve_pos(to)
-        self.tweens.kill(spr, "x")
-        self.tweens.kill(spr, "y")
-        self.tweens.tween_xy(spr, xy, dur, easing)
+        axis, value = self.stage.resolve_axis_target(to)
+        if axis == "x":
+            self.tweens.kill(spr, "x")
+            self.tweens.tween_attr(spr, "x", value, dur, easing)
+        elif axis == "y":
+            self.tweens.kill(spr, "y")
+            self.tweens.tween_attr(spr, "y", value, dur, easing)
+        else:
+            self.tweens.kill(spr, "x")
+            self.tweens.kill(spr, "y")
+            self.tweens.tween_attr(spr, "x", value[0], dur, easing)
+            self.tweens.tween_attr(spr, "y", value[1], dur, easing)
 
     def fade_to(self, sid: str, value: float, dur: float = 0.5,
                 easing: str = "linear") -> None:
@@ -176,6 +205,17 @@ class Engine:
         spr = self.stage.require_sprite(sid)
         value = max(0.0, min(255.0, float(value)))
         self.tweens.tween_attr(spr, "alpha", value, dur, easing)
+
+    def set_sprite_scale(self, sid: str, k: float) -> None:
+        """按档位缩放立绘（加法 API），模拟距离远近。
+
+        坐标语义为 (水平中心 x, 底边 y)，与尺寸无关，
+        因此缩放天然保持"底边中心"锚点，无需补偿。
+        """
+        self.stage.require_sprite(sid).set_scale(k)
+
+    def get_sprite_scale(self, sid: str) -> float:
+        return self.stage.require_sprite(sid).scale
 
     def set_alpha(self, sid: str, value: float) -> None:
         spr = self.stage.require_sprite(sid)
@@ -216,11 +256,39 @@ class Engine:
         return self.paused
 
     # ------------------------------------------------------------------ 主循环
+    SIM_HZ = 60.0                       # 逻辑步长基准（固定时间步）
+
     def update(self, dt: float) -> None:
+        """推进一个逻辑步（可变 dt 兼容入口）。
+
+        步骤开始时快照全部立绘位置到 prev_*，供渲染插值使用。
+        """
         if self.paused:
             return
+        for spr in self.stage._sprites.values():
+            spr.prev_x, spr.prev_y = spr.x, spr.y
         self.tweens.update(dt)
         self.timeline.update(dt)
+
+    def advance(self, real_dt: float) -> float:
+        """固定步长推进（主循环专用，加法 API）。
+
+        以 SIM_HZ 为基准累加真实时间并执行整数个逻辑步，
+        返回渲染插值因子 render_alpha ∈ [0,1)，供绘制层在
+        上一/当前逻辑帧之间补帧。暂停时不累积、返回 1.0。
+        """
+        if self.paused:
+            return 1.0
+        self._acc += max(0.0, float(real_dt))
+        steps = int(self._acc / self.sim_step)
+        if steps > 5:                    # 防死亡螺旋：单帧最多追 5 步
+            steps = 5
+            self._acc = steps * self.sim_step
+        for _ in range(steps):
+            self.update(self.sim_step)
+            self._acc -= self.sim_step
+        self.render_alpha = min(0.999, self._acc / self.sim_step)
+        return self.render_alpha
 
     def draw(self, target: pygame.Surface) -> None:
         self.stage.draw(target)

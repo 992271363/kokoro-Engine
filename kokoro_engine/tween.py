@@ -1,8 +1,8 @@
 """补间动画：缓动函数、单个补间与补间管理器。
 
 Tween 绑定 (对象, 属性名)，在 duration 秒内把属性从当前值插值到目标值。
-每帧由 TweenManager.update(dt) 驱动。坐标等二维量请对 x / y 分量
-分别创建补间（见 TweenManager.tween_xy）。
+每帧由 TweenManager.update(dt) 驱动。移动类语义（X轴/Y轴/XY轴）
+由调用方决定为哪个属性创建补间——单轴移动不应触碰另一轴。
 """
 
 from __future__ import annotations
@@ -84,13 +84,6 @@ class TweenManager:
                    on_complete: Optional[Callable[[], None]] = None) -> Tween:
         return self.add(Tween(obj, attr, getattr(obj, attr), to_value,
                               duration, easing, on_complete))
-
-    def tween_xy(self, obj: object, to_xy, duration: float,
-                 easing: str = "linear") -> List[Tween]:
-        """同时对 obj.x / obj.y 补间。"""
-        tx, ty = to_xy
-        return [self.tween_attr(obj, "x", tx, duration, easing),
-                self.tween_attr(obj, "y", ty, duration, easing)]
 
     def kill(self, obj: object, attr: Optional[str] = None) -> None:
         for tw in self._tweens:

@@ -34,6 +34,12 @@ def main() -> int:
     eng = Engine(asset_dir=os.path.join(ROOT, "assets"))
     surf = pygame.Surface(eng.size)
 
+    print("== 默认空场 ==")
+    assert eng.stage.bg_name == ""            # 不默认使用任何背景素材
+    assert eng.stage.sprite_count == 0        # 不默认显示任何立绘
+    run_frames(eng, 0.1, surface=surf)        # 空舞台绘制不炸
+    print("   无背景/无立绘/空绘制 OK")
+
     print("== 背景 ==")
     eng.set_background("bg/school", fade=0.0)
     assert eng.stage.bg_name == "bg/school"
@@ -336,6 +342,203 @@ def main() -> int:
     W.set_ui_scale(1.0)                      # 还原基准，后续测试不受影响
     W.get_font(14)
     print("   字体/行距缩放、滚动、事件平移、还原 OK")
+
+    print("== 立绘距离缩放 + 越界移动 ==")
+    dspr = eng.show_sprite("dist", image=None, pos="center", fade=0.3)
+    run_frames(eng, 0.5, surface=surf)
+    w0, h0 = dspr.width, dspr.height
+    cx0, by0 = dspr.x, dspr.y
+    eng.set_sprite_scale("dist", 0.5)
+    assert abs(dspr.scale - 0.5) < 1e-6
+    assert abs(dspr.width - w0 * 0.5) <= 2
+    assert abs(dspr.x - cx0) < 1.0            # 水平中心锚点不变
+    assert abs(dspr.y - by0) < 1.0            # 脚线锚点不变
+    eng.set_sprite_scale("dist", 1.25)
+    assert dspr.width > w0
+    eng.set_sprite_scale("dist", 1.0)
+    assert abs(dspr.width - w0) <= 1 and abs(dspr.height - h0) <= 1
+    rel_w = dspr.width / eng.size[0]
+    eng.resize_stage((1280, 720))
+    assert abs(dspr.width / eng.size[0] - rel_w) < 0.02  # base 同步缩放
+    eng.resize_stage((1920, 1080))
+
+    from gui.panel import ControlPanel as CP2
+    pnl2 = ControlPanel(eng, pygame.Rect(1200, 20, 432, 900),
+                        desktop_size=(1920, 1080))
+    assert pnl2.sld_x.min_val == -1920 and pnl2.sld_x.max_val == 3840
+    pnl2.select_sprite("dist")
+    pnl2.sld_x.set_value(-500.0, fire=True)
+    assert abs(dspr.x - (-500.0)) < 1e-6      # 可完全移出左边界
+    eng.resize_stage((1280, 720))
+    pnl2.update(0.016)
+    assert pnl2.sld_x.max_val == 2560 and pnl2.sld_y.min_val == -720
+    eng.resize_stage((1920, 1080))
+    pnl2.update(0.016)
+
+    assert len(pnl2.cyc_dist.options) == 5
+    pnl2.select_sprite("dist")
+    pnl2.cyc_dist.index = 4
+    pnl2._on_dist_level(pnl2.cyc_dist.value)               # 特写 1.75x
+    assert abs(eng.get_sprite_scale("dist") - 1.75) < 1e-6
+    assert abs(pnl2.pending_scale - 1.75) < 1e-6
+    pnl2.show_img = "fg/hinata"
+    pnl2._on_show()                            # 新立绘继承当前距离档
+    new_id = pnl2.sel_sid
+    assert new_id != "dist"
+    assert abs(eng.get_sprite_scale(new_id) - 1.75) < 1e-6
+    # 切回标准档即时生效（标准=1.25）
+    pnl2.cyc_dist.index = 2
+    pnl2._on_dist_level(pnl2.cyc_dist.value)
+    assert abs(eng.get_sprite_scale(new_id) - 1.25) < 1e-6
+    eng.remove_sprite(new_id)
+    eng.remove_sprite("dist")
+    run_frames(eng, 0.1, surface=surf)
+    print("   五档缩放/锚点保持/base同步/越界坐标/面板链路 OK")
+
+    print("== 舞台鼠标拖拽立绘 ==")
+    import main as app
+    disp_r = pygame.Rect(100, 100, 960, 540)      # 假想显示区（960x540 视口）
+    dsize = eng.size
+    dspr = eng.show_sprite("dragt", image=None, pos=(600, 700), fade=0.0)
+    ctl = app.StageDragController(eng, pnl2)
+
+    def to_screen(cx, cy):
+        return (disp_r.x + cx / dsize[0] * disp_r.w,
+                disp_r.y + cy / dsize[1] * disp_r.h)
+
+    # 制造活动补间：begin 应选中并取消补间，且无跳变
+    # （按下点取脚线上方一点：矩形碰撞不含底边线）
+    eng.move_sprite("dragt", to="right", dur=5.0)
+    assert ctl.begin(disp_r, *to_screen(600, 690)) is True
+    assert pnl2.sel_sid == "dragt"
+    assert not eng.tweens.has_tween(dspr, "x")
+    assert abs(dspr.x - 600) < 1e-6 and abs(dspr.y - 700) < 1e-6
+    # 锚点正上方抓取（偏移 y=+10）：拖动严格跟随光标画布坐标
+    ctl.motion(disp_r, *to_screen(650, 650))
+    assert abs(dspr.x - 650) < 1e-6
+    assert abs(dspr.y - 660) < 1e-6
+    # 非锚点抓取：保持抓取偏移
+    ctl.end()
+    dspr.x, dspr.y = 600.0, 700.0
+    assert ctl.begin(disp_r, *to_screen(650, 680)) is True
+    offx, offy = dspr.x - 650, dspr.y - 680       # (-50, +20)
+    ctl.motion(disp_r, *to_screen(300, 400))
+    assert abs(dspr.x - (300 + offx)) < 1e-6
+    assert abs(dspr.y - (400 + offy)) < 1e-6
+    # 可拖出画布边界（负坐标不钳制）
+    ctl.motion(disp_r, *to_screen(-800, -900))
+    assert abs(dspr.x - (-800 + offx)) < 1e-6
+    assert abs(dspr.y - (-900 + offy)) < 1e-6
+    # end 之后不再移动
+    ctl.end()
+    last_x = dspr.x
+    ctl.motion(disp_r, *to_screen(500, 500))
+    assert abs(dspr.x - last_x) < 1e-6
+    # 空处按下：取消选中且不进入拖拽
+    assert ctl.begin(disp_r, *to_screen(30, 30)) is False
+    assert pnl2.sel_sid is None and not ctl.active
+    eng.remove_sprite("dragt")
+    run_frames(eng, 0.1, surface=surf)
+    print("   抓取偏移/补间接管/越界拖动/结束失效/空处取消 OK")
+
+    print("== move 单轴/双轴语义 ==")
+    mspr = eng.show_sprite("mv", image=None, pos=(900, 400), fade=0.0)
+    left_x, _ = eng.stage.preset_xy("left")
+    # 水平预设：只动 X，Y 恒定且完全不创建 Y 补间
+    eng.move_sprite("mv", to="left", dur=0.4)
+    assert not eng.tweens.has_tween(mspr, "y")
+    run_frames(eng, 0.6, surface=surf)
+    assert abs(mspr.x - left_x) < 0.5
+    assert abs(mspr.y - 400) < 1e-6
+    # 显式二维目标：双轴同时补间并各自到位
+    eng.move_sprite("mv", to=(1300, 800), dur=0.3)
+    assert eng.tweens.has_tween(mspr, "x")
+    assert eng.tweens.has_tween(mspr, "y")
+    run_frames(eng, 0.5, surface=surf)
+    assert abs(mspr.x - 1300) < 0.5 and abs(mspr.y - 800) < 0.5
+    # 单轴移动不打断另一轴进行中的补间（并行合成）
+    eng.move_sprite("mv", to=(1400, 500), dur=2.0)
+    run_frames(eng, 0.2, surface=surf)
+    eng.move_sprite("mv", to="left", dur=0.3)
+    assert eng.tweens.has_tween(mspr, "x")
+    assert eng.tweens.has_tween(mspr, "y")          # 原 Y 补间仍存活
+    run_frames(eng, 2.5, surface=surf)
+    assert abs(mspr.x - left_x) < 0.5
+    assert abs(mspr.y - 500) < 0.5                  # Y 未被重置、最终到位
+    # Timeline 层端到端：to="right" 仅 X 变化
+    eng.play([
+        {"show": "mvt", "pos": (900, 350), "fade": 0.0},
+        {"move": "mvt", "to": "right", "dur": 0.2},
+    ])
+    guard = 0
+    while eng.timeline.busy and guard < 600:
+        eng.update(0.033)
+        eng.draw(surf)
+        guard += 1
+    mvt = eng.stage.get_sprite("mvt")
+    assert abs(mvt.x - dsize[0] * 0.75) < 0.5
+    assert abs(mvt.y - 350) < 1e-6
+    eng.remove_sprite("mv")
+    eng.remove_sprite("mvt")
+    run_frames(eng, 0.1, surface=surf)
+    print("   水平只动X/Y恒定/元组双轴/并行合成/timeline端到端 OK")
+
+    print("== 窗口自适应工作区 ==")
+    # 能容纳 → 原样返回
+    assert app.fit_window_to_work(1920, 1080, 2560, 1440) == (1920, 1080)
+    # 恰好等于屏幕 → 扣除标题栏/水平余量后等比收缩，保持≈16:9
+    fw, fh = app.fit_window_to_work(2560, 1440, 2560, 1440)
+    assert (fw, fh) == (2474, 1392), (fw, fh)
+    assert abs(fw / fh - 16 / 9) < 0.01
+    assert fh <= 1440 - app.CHROME_TITLE_H and fw <= 2560 - app.CHROME_PAD_W
+    # 极端小工作区：钳制到最小窗口（16:9）
+    assert app.fit_window_to_work(1280, 720, 500, 400) == (960, 540)
+    # 启动选档逻辑保持不变（画布档位语义）
+    assert app.choose_startup_preset(2560, 1440) == (2560, 1440)
+    print("   工作区适配/比例保持/极端钳制/选档不变 OK")
+
+    print("== 固定步长补帧 + 渲染缓存 ==")
+    from kokoro_engine.renderer import StageRenderer
+    # 累加器：两个半步恰好合成一个逻辑步，alpha 归零
+    eng._acc = 0.0
+    a1 = eng.advance(1 / 120)
+    assert 0.4 < a1 < 0.6, a1                   # 半步 → 因子≈0.5
+    a2 = eng.advance(1 / 120)
+    assert a2 == 0.0, a2                        # 跨过整步后归零
+    # 插值位置：update 快照 prev，render_pos 介于 prev 与 cur 之间
+    isp = eng.show_sprite("itp", image=None, pos=(600, 700), fade=0.0)
+    eng.move_sprite("itp", to=(1400, 900), dur=1.0)
+    eng.update(1 / 60)
+    px, py = isp.prev_x, isp.prev_y
+    assert abs(px - 600) < 1e-6 and abs(py - 700) < 1e-6
+    assert px <= isp.x <= px + (1400 - 600) / 60 + 1e-6
+    rx, ry = isp.render_pos(0.5)
+    assert px - 1e-6 <= rx <= isp.x + 1e-6
+    # snap 路径：手动位移后插值基准立即贴合
+    isp.x, isp.y = 300.0, 300.0
+    isp.snap_render()
+    rp = isp.render_pos(0.37)
+    assert abs(rp[0] - 300.0) < 1e-9 and abs(rp[1] - 300.0) < 1e-9
+    # 暂停冻结：advance 不推进、返回 1.0、位置静止
+    x_before = isp.x
+    eng.pause()
+    assert eng.advance(1 / 30) == 1.0
+    assert abs(isp.x - x_before) < 1e-12
+    eng.resume()
+    eng.remove_sprite("itp")
+    # 渲染器：缓存命中 + 插值绘制不炸
+    rnd = StageRenderer(eng)
+    rsurf = pygame.Surface((1280, 720))
+    cspr = eng.show_sprite("rc", image=None, pos="center", fade=0.0)
+    rrect = pygame.Rect(0, 0, 1280, 720)
+    rnd.draw(rsurf, rrect, 0.5)
+    assert cspr._disp_cache is not None          # 立绘缩放缓存已建
+    n_bg = len(rnd._bg_cache)
+    rnd.draw(rsurf, rrect, 0.7)                  # 同尺寸再次绘制
+    assert len(rnd._bg_cache) == n_bg            # 命中缓存未增长
+    eng.remove_sprite("rc")
+    run_frames(eng, 0.1, surface=surf)
+    print("   累加器/插值区间/snap贴合/暂停冻结/渲染缓存 OK")
 
     state = eng.get_state()
     assert isinstance(state, dict) and "sprites" in state

@@ -35,6 +35,7 @@ import pygame  # noqa: E402
 from gui.panel import ControlPanel  # noqa: E402
 from gui.widgets import get_font, set_ui_scale, s as ui_s  # noqa: E402
 from kokoro_engine import Engine  # noqa: E402
+from kokoro_engine.renderer import StageRenderer  # noqa: E402
 
 ASSET_DIR = os.path.join(ROOT, "assets")
 
@@ -42,6 +43,7 @@ MIN_WINDOW_SIZE = (960, 540)          # 最小窗口（16:9，物理像素）
 STATUS_BAR_H = 32                     # 底部状态栏占位（逻辑值，经 ui_s 缩放）
 PANEL_W = 432                         # 面板宽度（逻辑值）
 MARGIN = 20                           # 页边距（逻辑值）
+TARGET_FPS = 120                      # 渲染帧率上限（逻辑步长固定 60Hz，见 Engine.SIM_HZ）
 
 BG_COLOR = (16, 17, 20)
 WINDOW_TITLE = "kokoro-Engine v0.3 · galgame 演出系统"
@@ -95,6 +97,58 @@ def choose_startup_preset(desk_w: int, desk_h: int) -> tuple:
     return MIN_WINDOW_SIZE
 
 
+CHROME_TITLE_H = 48      # 系统窗口标题栏 + 安全余量（物理像素）
+CHROME_PAD_W = 16        # 水平安全余量
+
+
+def get_work_area():
+    """主显示器工作区 (宽, 高)——已排除任务栏。
+
+    失败时回退为整屏尺寸。
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            class _RECT(ctypes.Structure):
+                _fields_ = [("left", ctypes.c_long),
+                            ("top", ctypes.c_long),
+                            ("right", ctypes.c_long),
+                            ("bottom", ctypes.c_long)]
+
+            rect = _RECT()
+            # 0x0030 = SPI_GETWORKAREA
+            if ctypes.windll.user32.SystemParametersInfoW(
+                    0x0030, 0, ctypes.byref(rect), 0):
+                w, h = rect.right - rect.left, rect.bottom - rect.top
+                if w > 0 and h > 0:
+                    return max(1, w), max(1, h)
+        except Exception:
+            pass
+    try:
+        info = pygame.display.Info()
+        return max(1, info.current_w), max(1, info.current_h)
+    except Exception:
+        return MIN_WINDOW_SIZE
+
+
+def fit_window_to_work(w: int, h: int, wa_w: int, wa_h: int) -> tuple:
+    """把期望窗口尺寸收缩到工作区可容纳的最大 16:9 尺寸。
+
+    已能容纳时原样返回；画布分辨率不受影响（显示层等比缩放）。
+    结果不低于最小窗口（极端小屏兜底允许溢出）。
+    """
+    w, h = max(int(w), 1), max(int(h), 1)
+    aw = max(1, wa_w - CHROME_PAD_W)
+    ah = max(1, wa_h - CHROME_TITLE_H)
+    if w <= aw and h <= ah:
+        return w, h
+    scale = min(aw / w, ah / h)
+    fw = max(1, int(w * scale))
+    fh = max(1, int(h * scale))
+    return (max(fw, MIN_WINDOW_SIZE[0]), max(fh, MIN_WINDOW_SIZE[1]))
+
+
 def compute_layout(win_w: int, win_h: int, canvas: tuple) -> tuple:
     """返回 (panel_rect, disp_rect)。舞台显示区等比缩放并居中。
 
@@ -142,24 +196,28 @@ def main() -> int:
     set_ui_scale(detect_windows_ui_scale())
 
     info = pygame.display.Info()
+    work_w, work_h = get_work_area()
     preset0 = choose_startup_preset(info.current_w, info.current_h)
-    screen = pygame.display.set_mode(preset0, pygame.RESIZABLE)
+    # 画布 = 预设分辨率；窗口收缩到工作区内（不遮挡任务栏/标题栏）
+    win0_w, win0_h = fit_window_to_work(*preset0, work_w, work_h)
+    screen = pygame.display.set_mode((win0_w, win0_h), pygame.RESIZABLE)
     pygame.display.set_caption(WINDOW_TITLE)
     clock = pygame.time.Clock()
 
     engine = Engine(asset_dir=ASSET_DIR, stage_size=preset0)
-    stage_surface = pygame.Surface(engine.size)
+    renderer = StageRenderer(engine)
 
     desktop_w, desktop_h = max(0, info.current_w), max(0, info.current_h)
     panel_rect, disp = compute_layout(*screen.get_size(), engine.size)
+    disp_surface = pygame.Surface(disp.size)   # 显示分辨率合成目标
 
     def apply_preset(p) -> None:
-        """面板分辨率回调：切逻辑画布并让窗口 1:1 跟随。"""
-        nonlocal screen, stage_surface
+        """面板分辨率回调：切逻辑画布，窗口自适应工作区。"""
+        nonlocal screen
         if tuple(engine.size) != p:
             engine.resize_stage(p)
-            stage_surface = pygame.Surface(engine.size)
-        new_screen = _apply_window_size(*p)
+        ww, wh = fit_window_to_work(*p, work_w, work_h)
+        new_screen = _apply_window_size(ww, wh)
         if new_screen is not None:
             screen = new_screen
 
@@ -168,19 +226,15 @@ def main() -> int:
                              0, 0, ui_s(400), ui_s(460)),
                          on_preset_change=apply_preset,
                          desktop_size=(desktop_w, desktop_h))
+    drag = StageDragController(engine, panel)
 
     resize_types = {getattr(pygame, n) for n in ("VIDEORESIZE",
                                                  "WINDOWRESIZED")
                     if hasattr(pygame, n)}
 
-    # 开场演出：即时背景 + 左侧立绘淡入
-    engine.set_background("bg/school", fade=0.0)
-    engine.show_sprite("akari", image="fg/akari", pos="left", fade=1.2)
-    panel.select_sprite("akari")
-
     running = True
     while running:
-        dt = min(clock.tick(60) / 1000.0, 0.05)
+        dt = min(clock.tick(TARGET_FPS) / 1000.0, 0.25)
         win_w, win_h = screen.get_size()
 
         for event in pygame.event.get():
@@ -205,6 +259,14 @@ def main() -> int:
             if event.type in (pygame.MOUSEBUTTONDOWN,
                               pygame.MOUSEBUTTONUP,
                               pygame.MOUSEMOTION):
+                if drag.active:
+                    # 拖拽进行中：移动跟随，松开结束（优先于面板/弹层）
+                    if event.type == pygame.MOUSEMOTION:
+                        drag.motion(disp, *event.pos)
+                    elif event.type == pygame.MOUSEBUTTONUP and \
+                            event.button == 1:
+                        drag.end()
+                    continue
                 if panel.modal_open:
                     panel.handle_event(event)       # 弹层打开时全部给弹层
                     continue
@@ -213,10 +275,11 @@ def main() -> int:
                 elif event.type == pygame.MOUSEBUTTONDOWN \
                         and event.button == 1 \
                         and disp.collidepoint(event.pos):
-                    _pick_sprite(panel, engine, disp, *event.pos)
+                    drag.begin(disp, *event.pos)    # 拾取并进入拖拽
 
-        engine.update(dt)
+        sim_alpha = engine.advance(dt)   # 固定步长推进 + 帧间插值因子
         panel.update(dt)
+        panel.browser_anchor = disp
 
         # 布局每帧同步（窗口尺寸变化）
         panel_rect_n, disp_n = compute_layout(win_w, win_h, engine.size)
@@ -225,13 +288,10 @@ def main() -> int:
 
         # ------------------------------------------------------------ 渲染
         screen.fill(BG_COLOR)
-        engine.draw(stage_surface)
-        if disp.size == engine.size:
-            screen.blit(stage_surface, disp.topleft)
-        else:
-            scaled = pygame.transform.smoothscale(stage_surface,
-                                                  disp.size)
-            screen.blit(scaled, disp.topleft)
+        if disp_surface.get_size() != disp.size:
+            disp_surface = pygame.Surface(disp.size)
+        renderer.draw(disp_surface, disp, sim_alpha)
+        screen.blit(disp_surface, disp.topleft)
         pygame.draw.rect(screen, (70, 76, 92), disp, 1)
 
         zoom = disp.w / max(1, engine.size[0]) * 100
@@ -250,16 +310,77 @@ def main() -> int:
     return 0
 
 
-def _pick_sprite(panel: ControlPanel, engine: Engine,
-                 disp_rect: pygame.Rect, px: int, py: int) -> None:
-    """屏幕坐标 → 画布坐标（考虑显示缩放），前→后拾取立绘。"""
-    sx = (px - disp_rect.x) * engine.size[0] / max(1, disp_rect.w)
-    sy = (py - disp_rect.y) * engine.size[1] / max(1, disp_rect.h)
+def screen_to_stage(disp_rect: pygame.Rect, engine: Engine,
+                    px: float, py: float) -> tuple:
+    """屏幕坐标 → 画布坐标（考虑显示缩放）。"""
+    return ((px - disp_rect.x) * engine.size[0] / max(1, disp_rect.w),
+            (py - disp_rect.y) * engine.size[1] / max(1, disp_rect.h))
+
+
+def pick_sprite_at(engine: Engine, sx: float, sy: float):
+    """画布坐标处自前向后拾取立绘，未命中返回 None。"""
     for spr in reversed(engine.stage.sorted_sprites()):
         if spr.contains_point(sx, sy):
-            panel.select_sprite(spr.id)
+            return spr
+    return None
+
+
+class StageDragController:
+    """舞台预览区鼠标拖拽立绘：按下选中并抓取，移动跟随，松开结束。
+
+    保持抓取偏移（手按在哪一点，立绘相对该点不动）；
+    小于阈值的位移视为纯点击选中等价行为。
+    """
+
+    DRAG_THRESHOLD = 3      # 屏幕像素
+
+    def __init__(self, engine: Engine, panel: ControlPanel) -> None:
+        self.engine = engine
+        self.panel = panel
+        self.active = False
+        self._sid = None
+        self._off = (0.0, 0.0)
+        self._start = (0.0, 0.0)
+        self._moved = False
+
+    def begin(self, disp_rect: pygame.Rect, px: float, py: float) -> bool:
+        sx, sy = screen_to_stage(disp_rect, self.engine, px, py)
+        spr = pick_sprite_at(self.engine, sx, sy)
+        self.panel.select_sprite(spr.id if spr is not None else None)
+        if spr is None:
+            return False
+        # 手动拖动接管移动动画
+        self.engine.tweens.kill(spr, "x")
+        self.engine.tweens.kill(spr, "y")
+        self._sid = spr.id
+        self._off = (spr.x - sx, spr.y - sy)
+        self._start = (px, py)
+        self._moved = False
+        self.active = True
+        return True
+
+    def motion(self, disp_rect: pygame.Rect, px: float,
+               py: float) -> None:
+        if not self.active:
             return
-    panel.select_sprite(None)
+        if not self._moved:
+            if ((px - self._start[0]) ** 2 +
+                    (py - self._start[1]) ** 2) < \
+                    self.DRAG_THRESHOLD ** 2:
+                return
+            self._moved = True
+        spr = self.engine.stage.get_sprite(self._sid)
+        if spr is None:
+            self.end()
+            return
+        sx, sy = screen_to_stage(disp_rect, self.engine, px, py)
+        spr.x = sx + self._off[0]
+        spr.y = sy + self._off[1]
+        spr.snap_render()                # 拖拽即时贴合，无插值拖影
+
+    def end(self) -> None:
+        self.active = False
+        self._sid = None
 
 
 if __name__ == "__main__":
