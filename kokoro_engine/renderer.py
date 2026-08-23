@@ -23,19 +23,35 @@ class StageRenderer:
 
     def __init__(self, engine) -> None:
         self.engine = engine
-        self._bg_cache = {}   # id(surface) -> (disp_size, scaled_surface)
+        self._bg_version_seen = -1
+        self._bg_cache = {}   # (层槽位0=prev/1=cur, disp_size) -> scaled
 
     # ------------------------------------------------------------------ 缓存
-    def _scaled_bg(self, surf: pygame.Surface,
-                   disp_size: Tuple[int, int]) -> pygame.Surface:
-        key = id(surf)
-        entry = self._bg_cache.get(key)
-        if entry is not None and entry[0] == disp_size:
-            return entry[1]
-        scaled = pygame.transform.smoothscale(surf, disp_size)
-        if len(self._bg_cache) >= self.MAX_BG_ENTRIES:
+    def _bg_cache_dict(self, disp_size: Tuple[int, int]):
+        """按背景版本取缓存字典；版本变化即整体作废。
+
+        键不含 surface id——规避 CPython id() 复用导致的陈旧缓存
+        （表现为渲染残留/画布偏移）。
+        """
+        st = self.engine.stage
+        if st.bg_version != self._bg_version_seen:
+            self._bg_version_seen = st.bg_version
             self._bg_cache.clear()
-        self._bg_cache[key] = (disp_size, scaled)
+        return self._bg_cache
+
+    def _scaled_bg(self, slot: int, surf: pygame.Surface,
+                   disp_size: Tuple[int, int]) -> pygame.Surface:
+        if surf.get_size() == tuple(disp_size):
+            return surf                       # 同尺寸直通，保证逐像素一致
+        cache = self._bg_cache_dict(disp_size)
+        key = (slot, disp_size)
+        entry = cache.get(key)
+        if entry is not None:
+            return entry
+        scaled = pygame.transform.smoothscale(surf, disp_size)
+        if len(cache) >= self.MAX_BG_ENTRIES:
+            cache.clear()
+        cache[key] = scaled
         return scaled
 
     @staticmethod
@@ -66,8 +82,9 @@ class StageRenderer:
         sy = disp_rect.h / max(1, st.h)
 
         target.fill(STAGE_CLEAR, disp_rect)
-        for bg_surf, bg_alpha in st.background_layers():
-            scaled = self._scaled_bg(bg_surf, disp_rect.size)
+        for slot, (bg_surf, bg_alpha) in enumerate(
+                st.background_layers()):
+            scaled = self._scaled_bg(slot, bg_surf, disp_rect.size)
             if bg_alpha >= 255:
                 target.blit(scaled, disp_rect.topleft)
             else:

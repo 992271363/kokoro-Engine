@@ -38,6 +38,9 @@ class Stage:
         self._bg_progress = 1.0       # 1 表示无切换进行中
         self.bg_name = ""
         self.bg_transitioning = False
+        # 背景内容版本号：任何背景表面更替时自增，
+        # 供渲染器安全地作废缩放缓存（避免 id() 复用歧义）。
+        self.bg_version = 0
         # 立绘
         self._sprites: Dict[str, Sprite] = {}
         self._seq_counter = 0
@@ -83,6 +86,7 @@ class Stage:
             self._bg_progress = 1.0
             self.bg_transitioning = False
             self.bg_name = name
+            self.bg_version += 1
             return
 
         self.tweens.kill(self, "_bg_progress")
@@ -91,6 +95,7 @@ class Stage:
         self.bg_name = name
         self.bg_transitioning = True
         self._bg_progress = 0.0
+        self.bg_version += 1
 
         def done() -> None:
             self._bg_prev = None
@@ -204,6 +209,7 @@ class Stage:
         if bg_surface_loader is not None and self.bg_name:
             try:
                 self._bg_cur = bg_surface_loader(self.bg_name, self.size)
+                self.bg_version += 1
             except Exception as exc:
                 print(f"[stage] 背景重载失败({exc})，保留原背景。")
         # 过渡立即结束

@@ -102,9 +102,10 @@ CHROME_PAD_W = 16        # 水平安全余量
 
 
 def get_work_area():
-    """主显示器工作区 (宽, 高)——已排除任务栏。
+    """主显示器工作区 (left, top, 宽, 高)——已排除任务栏。
 
-    失败时回退为整屏尺寸。
+    left/top 为工作区在桌面上的原点偏移（竖排任务栏时非 0）。
+    失败时回退为整屏尺寸、原点 (0,0)。
     """
     if sys.platform == "win32":
         try:
@@ -120,55 +121,83 @@ def get_work_area():
             # 0x0030 = SPI_GETWORKAREA
             if ctypes.windll.user32.SystemParametersInfoW(
                     0x0030, 0, ctypes.byref(rect), 0):
-                w, h = rect.right - rect.left, rect.bottom - rect.top
+                w = rect.right - rect.left
+                h = rect.bottom - rect.top
                 if w > 0 and h > 0:
-                    return max(1, w), max(1, h)
+                    return rect.left, rect.top, max(1, w), max(1, h)
         except Exception:
             pass
     try:
         info = pygame.display.Info()
-        return max(1, info.current_w), max(1, info.current_h)
+        return 0, 0, max(1, info.current_w), max(1, info.current_h)
     except Exception:
-        return MIN_WINDOW_SIZE
+        return 0, 0, MIN_WINDOW_SIZE[0], MIN_WINDOW_SIZE[1]
 
 
-def fit_window_to_work(w: int, h: int, wa_w: int, wa_h: int) -> tuple:
-    """把期望窗口尺寸收缩到工作区可容纳的最大 16:9 尺寸。
+def _gui_chrome() -> tuple:
+    """编辑器 GUI 在窗口上占用的固定像素（与 compute_layout 口径一致）。
 
-    已能容纳时原样返回；画布分辨率不受影响（显示层等比缩放）。
-    结果不低于最小窗口（极端小屏兜底允许溢出）。
+    舞台区零边距贴边：水平占用 = 面板宽 + 面板右侧间隔；
+    垂直占用 = 底部状态栏。
     """
-    w, h = max(int(w), 1), max(int(h), 1)
+    return (ui_s(PANEL_W) + ui_s(MARGIN),
+            ui_s(STATUS_BAR_H))
+
+
+def fit_window_to_work(canvas_w: int, canvas_h: int,
+                       wa_w: int, wa_h: int,
+                       gui_w: int = 0, gui_h: int = 0) -> tuple:
+    """反解窗口尺寸：使"窗口 − GUI 占用"的舞台区域恰为画布比例(16:9)。
+
+    约束：窗口 ≤ 工作区余量 (wa_w - CHROME_PAD_W, wa_h - CHROME_TITLE_H)，
+    且舞台不超过画布原生尺寸（不做放大）。
+    舞台过小无法容纳时钳制回最小窗口（极端小屏兜底）。
+    注意：返回的窗口比例通常略宽于 16:9（多出的部分即右侧面板/状态栏
+    占比），这是消除黑边的预期行为；用户拖拽仍由 snap_16_9 锁定。
+    """
+    r = canvas_w / max(1, canvas_h)
     aw = max(1, wa_w - CHROME_PAD_W)
     ah = max(1, wa_h - CHROME_TITLE_H)
-    if w <= aw and h <= ah:
-        return w, h
-    scale = min(aw / w, ah / h)
-    fw = max(1, int(w * scale))
-    fh = max(1, int(h * scale))
-    return (max(fw, MIN_WINDOW_SIZE[0]), max(fh, MIN_WINDOW_SIZE[1]))
+    # 舞台最大高度：宽度约束 / 高度约束 / 不超过画布原生尺寸 三者取小
+    stage_h_max = min((aw - gui_w) / r, ah - gui_h, float(canvas_h))
+    if stage_h_max < 180:                    # 舞台高度不足，兜底最小窗
+        return MIN_WINDOW_SIZE
+    sh = int(stage_h_max)
+    sw = int(r * sh + 0.5)
+    while sw + gui_w > aw and sw > 320:      # 宽度取整越界时回退
+        sw -= 1
+    W = sw + gui_w
+    H = sh + gui_h
+    if W < MIN_WINDOW_SIZE[0] or H < MIN_WINDOW_SIZE[1]:
+        return MIN_WINDOW_SIZE
+    return W, H
 
 
 def compute_layout(win_w: int, win_h: int, canvas: tuple) -> tuple:
-    """返回 (panel_rect, disp_rect)。舞台显示区等比缩放并居中。
+    """返回 (panel_rect, disp_rect)。
 
-    GUI 布局尺寸经 ui_s() 缩放；Stage 画布与显示缩放不受影响。
+    舞台显示区零边距贴边：上/左/下贴合窗口边缘，右缘紧邻面板；
+    等比缩放，宽度约束时垂直贴顶（状态栏吸附画布底缘）。
     """
     cw, chh = canvas
     margin = ui_s(MARGIN)
     panel_w = ui_s(PANEL_W)
     status_h = ui_s(STATUS_BAR_H)
-    panel_x = win_w - panel_w - margin
-    panel_rect = pygame.Rect(panel_x, margin, panel_w,
-                             max(ui_s(220), win_h - margin * 2))
-    avail = pygame.Rect(margin, margin,
-                        max(ui_s(160), panel_x - margin * 2 - ui_s(12)),
-                        max(ui_s(90), win_h - margin - status_h))
+    panel_x = max(ui_s(160), win_w - panel_w - margin)
+    panel_rect = pygame.Rect(panel_x, 0, panel_w, win_h)
+    avail = pygame.Rect(0, 0, panel_x,
+                        max(ui_s(90), win_h - status_h))
     scale = min(avail.w / cw, avail.h / chh)
     disp = pygame.Rect(0, 0,
                        max(ui_s(64), int(cw * scale)),
                        max(ui_s(36), int(chh * scale)))
-    disp.center = avail.center
+    # 兜底对齐：垂直富余明显大于水平富余（宽度约束）时贴顶，
+    # 避免出现"顶部大黑条"；否则保持居中。
+    if (avail.h - disp.h) > (avail.w - disp.w):
+        disp.top = avail.y
+        disp.left = avail.centerx - disp.w // 2
+    else:
+        disp.center = avail.center
     return panel_rect, disp
 
 
@@ -178,6 +207,27 @@ def resize_event_size(event) -> tuple:
     if w is not None and hasattr(event, "h"):
         return int(w), int(event.h)
     return int(getattr(event, "x", 0)), int(getattr(event, "y", 0))
+
+
+def resize_needs_snap(cur: tuple, fitted) -> bool:
+    """判断是否需要 16:9 吸附。
+
+    程序化适配（fit）设定的非 16:9 窗口（±1px 容差）不回弹；
+    其余来源（用户拖拽等）正常吸附。
+    """
+    if fitted is None:
+        return True
+    fw, fh = fitted
+    return not (abs(cur[0] - fw) <= 1 and abs(cur[1] - fh) <= 1)
+
+
+def window_is_maximized() -> bool:
+    try:
+        SDL_WINDOW_MAXIMIZED = 0x00000004
+        return bool(pygame.Window.from_display_module()
+                    .get_flags() & SDL_WINDOW_MAXIMIZED)
+    except Exception:
+        return False
 
 
 def _apply_window_size(w: int, h: int):
@@ -196,11 +246,17 @@ def main() -> int:
     set_ui_scale(detect_windows_ui_scale())
 
     info = pygame.display.Info()
-    work_w, work_h = get_work_area()
+    wa_l, wa_t, work_w, work_h = get_work_area()
     preset0 = choose_startup_preset(info.current_w, info.current_h)
-    # 画布 = 预设分辨率；窗口收缩到工作区内（不遮挡任务栏/标题栏）
-    win0_w, win0_h = fit_window_to_work(*preset0, work_w, work_h)
+    # 画布 = 预设分辨率；窗口反解为"舞台区域恰为 16:9"，零黑边
+    gui_w, gui_h = _gui_chrome()
+    win0_w, win0_h = fit_window_to_work(*preset0, work_w, work_h,
+                                        gui_w, gui_h)
     screen = pygame.display.set_mode((win0_w, win0_h), pygame.RESIZABLE)
+    try:                                     # 对齐工作区原点（竖排任务栏等）
+        pygame.Window.from_display_module().position = (wa_l, wa_t)
+    except Exception:
+        pass
     pygame.display.set_caption(WINDOW_TITLE)
     clock = pygame.time.Clock()
 
@@ -210,16 +266,22 @@ def main() -> int:
     desktop_w, desktop_h = max(0, info.current_w), max(0, info.current_h)
     panel_rect, disp = compute_layout(*screen.get_size(), engine.size)
     disp_surface = pygame.Surface(disp.size)   # 显示分辨率合成目标
+    # 程序化设定的窗口尺寸（±1px 内不触发 16:9 吸附回弹）
+    fitted_ref = {"size": (win0_w, win0_h)}
 
     def apply_preset(p) -> None:
-        """面板分辨率回调：切逻辑画布，窗口自适应工作区。"""
-        nonlocal screen
+        """面板分辨率回调：切逻辑画布，窗口自适应工作区（零黑边反解）。"""
+        nonlocal screen, disp
         if tuple(engine.size) != p:
             engine.resize_stage(p)
-        ww, wh = fit_window_to_work(*p, work_w, work_h)
+        ww, wh = fit_window_to_work(*p, work_w, work_h, gui_w, gui_h)
         new_screen = _apply_window_size(ww, wh)
         if new_screen is not None:
             screen = new_screen
+        fitted_ref["size"] = (ww, wh)
+        # 窗口尺寸已变：立即重算布局，避免当帧错位
+        panel_rect_p, disp = compute_layout(*screen.get_size(), engine.size)
+        panel.set_rect(panel_rect_p)
 
     panel = ControlPanel(engine, panel_rect,
                          browser_rect=pygame.Rect(
@@ -243,12 +305,23 @@ def main() -> int:
                 continue
             if event.type in resize_types:
                 sw, sh = resize_event_size(event)
-                tw, th = snap_16_9(sw, sh)
                 cur = screen.get_size()
+                # 程序化适配的尺寸（±1px）不回弹；最大化时交由 WM
+                needs = resize_needs_snap(cur, fitted_ref["size"]) \
+                    and not window_is_maximized()
+                tw, th = snap_16_9(sw, sh) if needs else (cur[0], cur[1])
                 if abs(cur[0] - tw) > 1 or abs(cur[1] - th) > 1:
                     new_screen = _apply_window_size(tw, th)
                     if new_screen is not None:
                         screen = new_screen
+                    fitted_ref["size"] = (tw, th)
+                # 立即同步本帧布局，避免一帧错位/残留
+                win_w, win_h = screen.get_size()
+                panel_rect_r, disp_r = compute_layout(
+                    win_w, win_h, engine.size)
+                panel.set_rect(panel_rect_r)
+                disp = disp_r
+                panel.browser_anchor = disp
                 continue
             if event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:

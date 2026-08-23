@@ -269,8 +269,9 @@ def main() -> int:
         pr, dr = app.compute_layout(w0, h0, eng.size)
         ratio = dr.w / dr.h
         assert abs(ratio - eng.size[0] / eng.size[1]) < 0.02
-        assert dr.right <= pr.x - 8
-        assert dr.top >= app.MARGIN and dr.bottom <= h0 - app.STATUS_BAR_H
+        assert dr.right <= pr.x                    # 贴边：右缘紧邻面板
+        assert dr.left == 0 and dr.top == 0        # 上/左零黑边
+        assert dr.bottom <= h0 - app.ui_s(32)      # 不压状态栏
     # 拖拽吸附：始终回到 16:9，且不低于最小窗口
     assert app.snap_16_9(1200, 600) == (1200, 675)      # 保宽调高更近
     assert app.snap_16_9(1100, 700) == (1100, 619)      # 保宽调高更近
@@ -483,19 +484,46 @@ def main() -> int:
     run_frames(eng, 0.1, surface=surf)
     print("   水平只动X/Y恒定/元组双轴/并行合成/timeline端到端 OK")
 
-    print("== 窗口自适应工作区 ==")
-    # 能容纳 → 原样返回
+    print("== 窗口自适应工作区（零黑边反解） ==")
+    R = 16 / 9
+    # 零 GUI 占用：恒等情形
     assert app.fit_window_to_work(1920, 1080, 2560, 1440) == (1920, 1080)
-    # 恰好等于屏幕 → 扣除标题栏/水平余量后等比收缩，保持≈16:9
-    fw, fh = app.fit_window_to_work(2560, 1440, 2560, 1440)
-    assert (fw, fh) == (2474, 1392), (fw, fh)
-    assert abs(fw / fh - 16 / 9) < 0.01
-    assert fh <= 1440 - app.CHROME_TITLE_H and fw <= 2560 - app.CHROME_PAD_W
+    # 带 GUI 占用：舞台区域比例 == 16:9 且窗口 ≤ 工作区余量
+    gw, gh = app._gui_chrome()
+    W, H = app.fit_window_to_work(2560, 1440, 2560, 1440, gw, gh)
+    assert W <= 2560 - app.CHROME_PAD_W and H <= 1440 - app.CHROME_TITLE_H
+    assert abs((W - gw) / (H - gh) - R) < 0.01
+    # 换一组画布/工作区同样满足反解关系
+    for cv in ((1280, 720), (1920, 1080), (2560, 1440)):
+        W2, H2 = app.fit_window_to_work(*cv, 1920, 1080, gw, gh)
+        assert W2 <= 1920 - app.CHROME_PAD_W
+        assert H2 <= 1080 - app.CHROME_TITLE_H
+        assert abs((W2 - gw) / (H2 - gh) - R) < 0.02
     # 极端小工作区：钳制到最小窗口（16:9）
-    assert app.fit_window_to_work(1280, 720, 500, 400) == (960, 540)
+    assert app.fit_window_to_work(1280, 720, 500, 400, gw, gh) == (960, 540)
     # 启动选档逻辑保持不变（画布档位语义）
     assert app.choose_startup_preset(2560, 1440) == (2560, 1440)
-    print("   工作区适配/比例保持/极端钳制/选档不变 OK")
+    # 贴边布局：画布零边距，右缘紧邻面板；宽度约束时贴顶
+    pr3, dr3 = app.compute_layout(2448, 1047, (1920, 1080))
+    assert dr3.left >= 0 and dr3.top >= 0
+    assert dr3.right <= pr3.left and dr3.bottom <= 1047 - app.ui_s(32)
+    # 宽度约束场景：垂直贴顶 + 水平居中（无顶部黑条）
+    pr4, dr4 = app.compute_layout(2448, 700, (1920, 1080))
+    assert dr4.top == 0 and dr4.left > 0
+    # 高度约束场景：水平居中留白属预期（对称）
+    assert abs(dr3.centery - (1047 - app.ui_s(32)) // 2) <= 1
+    # fit 反解的理想窗口：画布原生分辨率 1:1 满铺、零黑边
+    fw0, fh0 = app.fit_window_to_work(1920, 1080, 2560, 1440,
+                                      app._gui_chrome()[0],
+                                      app._gui_chrome()[1])
+    pr5, dr5 = app.compute_layout(fw0, fh0, (1920, 1080))
+    assert dr5.size == (1920, 1080) and dr5.topleft == (0, 0)
+    # 程序化尺寸（±1px）不触发吸附回弹；用户拖拽尺寸正常吸附
+    assert not app.resize_needs_snap((1722, 969), (1722, 969))
+    assert not app.resize_needs_snap((1721, 968), (1722, 969))
+    assert app.resize_needs_snap((2000, 1125), (1722, 969))
+    assert app.resize_needs_snap((2000, 1125), None)
+    print("   反解比例/约束钳制/贴边布局/吸附豁免/选档不变 OK")
 
     print("== 固定步长补帧 + 渲染缓存 ==")
     from kokoro_engine.renderer import StageRenderer
@@ -539,6 +567,32 @@ def main() -> int:
     eng.remove_sprite("rc")
     run_frames(eng, 0.1, surface=surf)
     print("   累加器/插值区间/snap贴合/暂停冻结/渲染缓存 OK")
+
+    print("== 渲染一致性 / 无陈旧缓存 ==")
+    from kokoro_engine.renderer import StageRenderer as SR2
+
+    def _bytes(s):
+        return pygame.image.tobytes(s, "RGBA")
+
+    cmp_spr = eng.show_sprite("cmp", image=None, pos="center", fade=0.0)
+    # 1:1 尺寸：renderer 输出必须与 stage.draw 逐像素一致
+    ref = pygame.Surface(eng.size)
+    eng.stage.draw(ref)
+    got = pygame.Surface(eng.size)
+    SR2(eng).draw(got, pygame.Rect(0, 0, *eng.size), 1.0)
+    assert _bytes(ref) == _bytes(got), "1:1 渲染不一致"
+    # 连续切换背景多轮：旧渲染器输出与全新渲染器逐像素一致
+    scene = pygame.Surface((960, 540))
+    r_a = SR2(eng)
+    rect_s = pygame.Rect(0, 0, 960, 540)
+    for name in ("bg/school", "bg/night", "bg/school", "bg/room"):
+        eng.set_background(name, fade=0.0)
+        r_a.draw(scene, rect_s, 1.0)
+        chk = pygame.Surface((960, 540))
+        SR2(eng).draw(chk, rect_s, 1.0)
+        assert _bytes(scene) == _bytes(chk), f"陈旧缓存: {name}"
+    eng.remove_sprite("cmp")
+    print("   1:1逐像素一致/多轮切背景无陈旧缓存 OK")
 
     state = eng.get_state()
     assert isinstance(state, dict) and "sprites" in state
